@@ -77,7 +77,7 @@ export default function POSApp() {
 
   async function cargarDatos() {
     try {
-      const res = await fetch('/api/data', { cache: 'no-store' });
+      const res = await fetch('/api/data?t=' + Date.now(), { cache: 'no-store' });
       const json = await res.json();
       if (json.error) {
         setError(json.error);

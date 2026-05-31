@@ -39,12 +39,15 @@ export async function GET() {
       .order('created_at', { ascending: false });
     if (eCxc) throw eCxc;
 
-    return NextResponse.json({
-      turno,
-      productos: productos || [],
-      cuentas: cuentas || [],
-      cuentasPorCobrar: cuentasPorCobrar || [],
-    });
+    return NextResponse.json(
+      {
+        turno,
+        productos: productos || [],
+        cuentas: cuentas || [],
+        cuentasPorCobrar: cuentasPorCobrar || [],
+      },
+      { headers: { 'Cache-Control': 'no-store, max-age=0' } }
+    );
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
