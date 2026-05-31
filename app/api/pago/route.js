@@ -2,9 +2,9 @@ import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
-// Registrar un pago. Si el método es "fiado", además crea una entrada
-// en cuentas_por_cobrar con el nombre del jugador.
+// Registrar un pago. Si es "fiado", crea entrada en cuentas_por_cobrar.
 export async function POST(request) {
   try {
     const { cuenta_id, jugador_id, jugador_nombre, monto, metodo } = await request.json();
@@ -27,8 +27,8 @@ export async function POST(request) {
       if (e2) throw e2;
     }
 
-    return NextResponse.json({ pago });
+    return NextResponse.json({ pago }, noStore);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }

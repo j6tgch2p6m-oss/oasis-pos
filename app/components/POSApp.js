@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 
 const CATEGORIAS = ['Alquiler cancha', 'Accesorios', 'Bebidas', 'Cervezas', 'Snacks'];
 const CANCHAS = [
@@ -21,15 +21,13 @@ const fmt = (n) =>
     maximumFractionDigits: 0,
   }).format(Number(n) || 0);
 
-// ===== Helpers de negocio (trabajan sobre el formato de la base de datos) =====
+// ===== Helpers de negocio (todo coercionado a número) =====
 function totalCuenta(cuenta) {
-  return (cuenta.consumos || []).reduce((s, c) => s + Number(c.total), 0);
+  return (cuenta.consumos || []).reduce((s, c) => s + (Number(c.total) || 0), 0);
 }
-
 function totalPagado(cuenta) {
-  return (cuenta.pagos || []).reduce((s, p) => s + Number(p.monto), 0);
+  return (cuenta.pagos || []).reduce((s, p) => s + (Number(p.monto) || 0), 0);
 }
-
 function desglosePorJugador(cuenta) {
   const d = (cuenta.jugadores || []).map((j) => ({
     jugadorId: j.id,
@@ -39,14 +37,15 @@ function desglosePorJugador(cuenta) {
   }));
   (cuenta.consumos || []).forEach((c) => {
     const ids = c.asignacion_jugadores || [];
+    const tot = Number(c.total) || 0;
     if (c.tipo_asignacion === 'individual') {
       const idx = d.findIndex((x) => x.jugadorId === ids[0]);
       if (idx >= 0) {
-        d[idx].total += Number(c.total);
+        d[idx].total += tot;
         d[idx].items += 1;
       }
     } else {
-      const parte = Number(c.total) / (ids.length || 1);
+      const parte = tot / (ids.length || 1);
       ids.forEach((id) => {
         const idx = d.findIndex((x) => x.jugadorId === id);
         if (idx >= 0) {
@@ -58,16 +57,15 @@ function desglosePorJugador(cuenta) {
   });
   return d;
 }
-
 function pagadoPorJugador(cuenta, jugadorId) {
   return (cuenta.pagos || [])
     .filter((p) => p.jugador_id === jugadorId)
-    .reduce((s, p) => s + Number(p.monto), 0);
+    .reduce((s, p) => s + (Number(p.monto) || 0), 0);
 }
 
 // ============================================================================
 export default function POSApp() {
-  const [estado, setEstado] = useState(null); // { turno, productos, cuentas, cuentasPorCobrar }
+  const [estado, setEstado] = useState(null);
   const [vista, setVista] = useState('home');
   const [cuentaActivaId, setCuentaActivaId] = useState(null);
   const [modal, setModal] = useState(null);
@@ -99,10 +97,11 @@ export default function POSApp() {
   async function llamarApi(url, metodo, body) {
     setOcupado(true);
     try {
-      const res = await fetch(url, {
+      const res = await fetch(url + '?t=' + Date.now(), {
         method: metodo,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        cache: 'no-store',
       });
       const json = await res.json();
       if (json.error) {
@@ -125,42 +124,51 @@ export default function POSApp() {
 
   if (error) {
     return (
-      <Pantalla>
-        <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 14, padding: 24, color: '#791F1F' }}>
-          <h2 style={{ marginBottom: 8 }}>Problema de conexión</h2>
-          <p style={{ fontSize: 14 }}>{error}</p>
-          <button onClick={() => { setCargando(true); cargarDatos(); }} style={{ ...btnPri, marginTop: 16, background: '#C0392B', color: 'white' }}>Reintentar</button>
-        </div>
-      </Pantalla>
+      <div style={{ minHeight: '100vh' }}>
+        <Header turno={null} vista="home" onHome={() => {}} />
+        <Pantalla>
+          <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 14, padding: 24, color: '#791F1F' }}>
+            <h2 style={{ marginBottom: 8 }}>Problema de conexión</h2>
+            <p style={{ fontSize: 14 }}>{error}</p>
+            <button onClick={() => { setError(null); setCargando(true); cargarDatos(); }} style={{ ...btnPri, marginTop: 16, background: '#C0392B', color: 'white' }}>Reintentar</button>
+          </div>
+        </Pantalla>
+      </div>
     );
   }
 
-  const turno = estado.turno;
-  const cuentaActiva = estado.cuentas.find((c) => c.id === cuentaActivaId);
+  const turno = estado?.turno || null;
+  const cuentas = estado?.cuentas || [];
+  const cuentaActiva = cuentas.find((c) => c.id === cuentaActivaId);
+
+  // Blindaje: si estamos en vista cuenta pero la cuenta no aparece, volver a home
+  const vistaSegura =
+    vista === 'cuenta' && !cuentaActiva ? 'home' : vista;
 
   return (
     <div style={{ minHeight: '100vh' }}>
-      <Header turno={turno} vista={vista} onHome={() => { setVista('home'); setCuentaActivaId(null); }} />
+      <Header turno={turno} vista={vistaSegura} onHome={() => { setVista('home'); setCuentaActivaId(null); }} />
 
       <div style={{ padding: 20, maxWidth: 1000, margin: '0 auto' }}>
         {!turno && (
           <VistaInicio
             ocupado={ocupado}
-            onAbrir={async (cajera, base) => { await llamarApi('/api/turno', 'POST', { cajera, base_caja: base }); }}
+            onAbrir={async (cajera, base) => { await llamarApi('/api/turno', 'POST', { cajera, base_caja: base }); setVista('home'); }}
           />
         )}
 
-        {turno && vista === 'home' && (
+        {turno && vistaSegura === 'home' && (
           <VistaHome
             estado={estado}
             onAbrirCancha={(canchaId) => setModal({ tipo: 'nuevaCuenta', canchaId })}
             onNuevaSuelta={() => setModal({ tipo: 'nuevaCuenta', canchaId: null })}
             onVerCuenta={(id) => { setCuentaActivaId(id); setVista('cuenta'); }}
             onPorCobrar={() => setVista('porCobrar')}
+            onCerrarTurno={() => setVista('cierre')}
           />
         )}
 
-        {turno && vista === 'cuenta' && cuentaActiva && (
+        {turno && vistaSegura === 'cuenta' && cuentaActiva && (
           <VistaCuenta
             cuenta={cuentaActiva}
             productos={estado.productos}
@@ -172,12 +180,25 @@ export default function POSApp() {
           />
         )}
 
-        {turno && vista === 'porCobrar' && (
+        {turno && vistaSegura === 'porCobrar' && (
           <VistaPorCobrar estado={estado} />
+        )}
+
+        {turno && vistaSegura === 'cierre' && (
+          <VistaCierre
+            estado={estado}
+            ocupado={ocupado}
+            onConfirmar={async () => {
+              await llamarApi('/api/turno', 'PATCH', { turnoId: turno.id });
+              setVista('home');
+              setCuentaActivaId(null);
+            }}
+            onVolver={() => setVista('home')}
+          />
         )}
       </div>
 
-      {modal?.tipo === 'nuevaCuenta' && (
+      {modal?.tipo === 'nuevaCuenta' && turno && (
         <ModalNuevaCuenta
           canchaId={modal.canchaId}
           ocupado={ocupado}
@@ -222,7 +243,7 @@ export default function POSApp() {
   );
 }
 
-// ===== Componentes de layout =====
+// ===== Layout =====
 function Pantalla({ children }) {
   return <div style={{ padding: 40, maxWidth: 600, margin: '60px auto' }}>{children}</div>;
 }
@@ -269,25 +290,26 @@ function VistaInicio({ onAbrir, ocupado }) {
         <label style={lbl}>Base de caja inicial</label>
         <div style={{ position: 'relative', margin: '10px 0 28px' }}>
           <span style={{ position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)', fontSize: 20, fontWeight: 700, color: '#5C7785' }}>$</span>
-          <input type="number" value={base} onChange={(e) => setBase(e.target.value)} placeholder="50000" style={{ width: '100%', padding: '16px 18px 16px 34px', borderRadius: 10, border: '2px solid #E5E5E5', fontSize: 20, fontWeight: 700, outline: 'none', fontFamily: 'inherit' }} />
+          <input type="number" value={base} onChange={(e) => setBase(e.target.value)} placeholder="50000" style={{ width: '100%', padding: '16px 18px 16px 34px', borderRadius: 10, border: '2px solid #E5E5E5', fontSize: 20, fontWeight: 700, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }} />
         </div>
-        <button onClick={() => cajera && base && onAbrir(cajera, Number(base))} disabled={!cajera || !base || ocupado} style={{ ...btnPri, width: '100%', background: cajera && base && !ocupado ? 'linear-gradient(135deg,#F2B749,#E8A82B)' : '#E5E5E5', color: cajera && base ? '#1A3D4D' : '#999', fontSize: 16 }}>{ocupado ? 'Abriendo…' : 'ABRIR TURNO →'}</button>
+        <button onClick={() => cajera && base !== '' && onAbrir(cajera, Number(base))} disabled={!cajera || base === '' || ocupado} style={{ ...btnPri, width: '100%', background: cajera && base !== '' && !ocupado ? 'linear-gradient(135deg,#F2B749,#E8A82B)' : '#E5E5E5', color: cajera && base !== '' ? '#1A3D4D' : '#999', fontSize: 16 }}>{ocupado ? 'Abriendo…' : 'ABRIR TURNO →'}</button>
       </div>
     </div>
   );
 }
 
 // ===== Vista: home =====
-function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCobrar }) {
-  const { cuentas, cuentasPorCobrar, turno } = estado;
-  const ventasDia = cuentas.reduce((s, c) => s + totalPagado(c), 0);
-  const totalCxc = cuentasPorCobrar.reduce((s, c) => s + Number(c.monto), 0);
+function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCobrar, onCerrarTurno }) {
+  const cuentas = estado.cuentas || [];
+  const cxc = estado.cuentasPorCobrar || [];
+  const resumen = estado.resumenTurno || {};
+  const totalCxc = cxc.reduce((s, c) => s + (Number(c.monto) || 0), 0);
   const sueltas = cuentas.filter((c) => !c.cancha_id);
 
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
-        <Kpi label="Cobrado hoy" value={fmt(ventasDia)} color="#2E84A6" />
+        <Kpi label="Vendido en el turno" value={fmt(resumen.totalVentas)} color="#2E84A6" />
         <Kpi label="Cuentas activas" value={cuentas.length} color="#60AEBF" />
         <Kpi label="Por cobrar" value={fmt(totalCxc)} color="#C0392B" onClick={onPorCobrar} />
       </div>
@@ -304,7 +326,7 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
                 <div className="display" style={{ fontSize: 26, fontWeight: 800 }}>{cancha.nombre}</div>
                 {ocupada ? (
                   <div style={{ marginTop: 6, opacity: 0.85, fontSize: 13 }}>
-                    <div>👥 {cuenta.jugadores.map((j) => j.nombre).join(' · ')}</div>
+                    <div>👥 {(cuenta.jugadores || []).map((j) => j.nombre).join(' · ')}</div>
                     <div style={{ fontWeight: 800, fontSize: 17, marginTop: 6, color: '#F2B749' }}>{fmt(totalCuenta(cuenta))}</div>
                   </div>
                 ) : (
@@ -328,12 +350,17 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(240px,1fr))', gap: 10 }}>
             {sueltas.map((c) => (
               <button key={c.id} onClick={() => onVerCuenta(c.id)} style={{ background: 'white', border: '2px solid #60AEBF', borderRadius: 14, padding: 14, cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
-                <div style={{ fontSize: 15, fontWeight: 700 }}>{c.jugadores.map((j) => j.nombre).join(' · ')}</div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{(c.jugadores || []).map((j) => j.nombre).join(' · ')}</div>
                 <div style={{ fontSize: 18, fontWeight: 800, color: '#2E84A6', marginTop: 6 }}>{fmt(totalCuenta(c))}</div>
               </button>
             ))}
           </div>
         )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <button onClick={onPorCobrar} style={{ background: 'white', border: '2px solid #C0392B', color: '#C0392B', padding: 14, borderRadius: 12, fontWeight: 700, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit' }}>⚠ Por Cobrar ({cxc.length})</button>
+        <button onClick={onCerrarTurno} style={{ background: 'linear-gradient(135deg,#F2B749,#E8A82B)', border: 'none', color: '#1A3D4D', padding: 14, borderRadius: 12, fontWeight: 800, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit' }}>🧾 CERRAR TURNO</button>
       </div>
     </div>
   );
@@ -346,7 +373,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
   const saldo = total - pagado;
   const desglose = desglosePorJugador(cuenta);
   const cancha = CANCHAS.find((c) => c.id === cuenta.cancha_id);
-  const iconoProducto = (id) => productos.find((p) => p.id === id)?.icono || '•';
+  const iconoProducto = (id) => (productos.find((p) => p.id === id) || {}).icono || '•';
 
   return (
     <div>
@@ -354,7 +381,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
             <div style={{ fontSize: 11, color: '#5C7785', fontWeight: 700, letterSpacing: '0.05em' }}>{cancha ? cancha.nombre.toUpperCase() : 'CUENTA SIN CANCHA'}</div>
-            <div className="display" style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{cuenta.jugadores.map((j) => j.nombre).join(' · ')}</div>
+            <div className="display" style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{(cuenta.jugadores || []).map((j) => j.nombre).join(' · ')}</div>
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 10, color: '#5C7785', fontWeight: 700 }}>SALDO</div>
@@ -384,18 +411,18 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
       </div>
 
       <Titulo>Consumos</Titulo>
-      <div style={{ background: 'white', borderRadius: 14, padding: cuenta.consumos.length === 0 ? 24 : 6, marginBottom: 20, boxShadow: '0 3px 12px rgba(0,0,0,0.04)' }}>
-        {cuenta.consumos.length === 0 ? (
+      <div style={{ background: 'white', borderRadius: 14, padding: (cuenta.consumos || []).length === 0 ? 24 : 6, marginBottom: 20, boxShadow: '0 3px 12px rgba(0,0,0,0.04)' }}>
+        {(cuenta.consumos || []).length === 0 ? (
           <div style={{ textAlign: 'center', color: '#8A7B5F', fontSize: 13 }}>Aún no hay consumos. Toca "+ Agregar producto".</div>
         ) : (
-          cuenta.consumos.map((co) => (
+          (cuenta.consumos || []).map((co) => (
             <div key={co.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10 }}>
               <div style={{ fontSize: 22 }}>{iconoProducto(co.producto_id)}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{co.nombre_snapshot} × {co.cantidad}</div>
                 <div style={{ fontSize: 11, color: '#5C7785', marginTop: 2 }}>
                   {co.tipo_asignacion === 'individual'
-                    ? `Para: ${cuenta.jugadores.find((j) => j.id === (co.asignacion_jugadores || [])[0])?.nombre || '?'}`
+                    ? `Para: ${((cuenta.jugadores || []).find((j) => j.id === (co.asignacion_jugadores || [])[0]) || {}).nombre || '?'}`
                     : `Dividido entre ${(co.asignacion_jugadores || []).length}`}
                 </div>
               </div>
@@ -406,21 +433,21 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
         )}
       </div>
 
-      {cuenta.pagos.length > 0 && (
+      {(cuenta.pagos || []).length > 0 && (
         <>
           <Titulo>Pagos registrados</Titulo>
           <div style={{ background: 'white', borderRadius: 14, padding: 6, marginBottom: 20, boxShadow: '0 3px 12px rgba(0,0,0,0.04)' }}>
-            {cuenta.pagos.map((p) => {
-              const m = METODOS.find((x) => x.v === p.metodo);
-              const j = cuenta.jugadores.find((x) => x.id === p.jugador_id);
+            {(cuenta.pagos || []).map((p) => {
+              const m = METODOS.find((x) => x.v === p.metodo) || {};
+              const j = (cuenta.jugadores || []).find((x) => x.id === p.jugador_id) || {};
               return (
                 <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10 }}>
-                  <div style={{ fontSize: 18 }}>{m?.icon}</div>
+                  <div style={{ fontSize: 18 }}>{m.icon}</div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{j?.nombre || '?'}</div>
-                    <div style={{ fontSize: 11, color: '#5C7785' }}>{m?.label}</div>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>{j.nombre || '?'}</div>
+                    <div style={{ fontSize: 11, color: '#5C7785' }}>{m.label}</div>
                   </div>
-                  <div style={{ fontWeight: 700, color: m?.color, fontSize: 14 }}>{fmt(p.monto)}</div>
+                  <div style={{ fontWeight: 700, color: m.color, fontSize: 14 }}>{fmt(p.monto)}</div>
                 </div>
               );
             })}
@@ -441,8 +468,8 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
 
 // ===== Vista: por cobrar =====
 function VistaPorCobrar({ estado }) {
-  const lista = estado.cuentasPorCobrar;
-  const total = lista.reduce((s, c) => s + Number(c.monto), 0);
+  const lista = estado.cuentasPorCobrar || [];
+  const total = lista.reduce((s, c) => s + (Number(c.monto) || 0), 0);
   return (
     <div>
       <div style={{ background: 'linear-gradient(135deg,#C0392B,#962D22)', color: 'white', borderRadius: 18, padding: 22, marginBottom: 18 }}>
@@ -459,13 +486,101 @@ function VistaPorCobrar({ estado }) {
               <div style={{ width: 38, height: 38, borderRadius: '50%', background: '#FFE4E1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>⚠</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 14 }}>{c.jugador_nombre}</div>
-                <div style={{ fontSize: 11, color: '#5C7785' }}>{new Date(c.created_at).toLocaleDateString('es-CO')}</div>
+                <div style={{ fontSize: 11, color: '#5C7785' }}>{c.created_at ? new Date(c.created_at).toLocaleDateString('es-CO') : ''}</div>
               </div>
               <div style={{ fontSize: 16, fontWeight: 800, color: '#C0392B' }}>{fmt(c.monto)}</div>
             </div>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ===== Vista: cierre de turno (Fase 3) =====
+function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
+  const turno = estado.turno || {};
+  const r = estado.resumenTurno || {};
+  const cuentas = estado.cuentas || [];
+  const base = Number(turno.base_caja) || 0;
+  const efectivo = Number(r.efectivo) || 0;
+  const cajaEsperada = base + efectivo;
+  const hayCuentasAbiertas = cuentas.length > 0;
+  const hoy = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16 }}>
+        <div className="display" style={{ fontSize: 28, fontWeight: 800 }}>Cierre del Turno</div>
+        <p style={{ color: '#5C7785', fontSize: 13, marginTop: 3 }}>Toma una foto de este reporte y mándalo por WhatsApp</p>
+      </div>
+
+      {hayCuentasAbiertas && (
+        <div style={{ background: '#FEF3E2', border: '2px solid #F2B749', borderRadius: 12, padding: 14, marginBottom: 16, color: '#854F0B', fontSize: 13 }}>
+          ⚠ Tienes {cuentas.length} {cuentas.length === 1 ? 'cuenta abierta' : 'cuentas abiertas'} sin cerrar. Puedes cerrar el turno igual, pero lo recomendable es cobrar y cerrar esas cuentas primero.
+        </div>
+      )}
+
+      <div style={{ background: 'white', borderRadius: 20, padding: 26, boxShadow: '0 18px 50px rgba(0,0,0,0.08)' }}>
+        <div style={{ textAlign: 'center', borderBottom: '2px dashed #E5E5E5', paddingBottom: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 26, marginBottom: 3 }}>🎾</div>
+          <div className="display" style={{ fontSize: 22, fontWeight: 800 }}>OASIS PÁDEL CLUB</div>
+          <div style={{ fontSize: 12, color: '#5C7785', marginTop: 3 }}>Cierre de turno · {hoy}</div>
+          <div style={{ fontSize: 12, color: '#5C7785' }}>Cajera: <strong>{turno.cajera}</strong> · Apertura: {fmt(base)}</div>
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 10 }}>INGRESOS POR MÉTODO DE PAGO</div>
+          <Fila icon="💵" label="Efectivo" value={r.efectivo} color="#27AE60" />
+          <Fila icon="🔁" label="Transferencia" value={r.transferencia} color="#2E84A6" />
+          <Fila icon="💳" label="Tarjeta" value={r.tarjeta} color="#8E44AD" />
+          <Fila icon="⚠" label="Fiado (no cobrado)" value={r.fiado} color="#C0392B" />
+          <div style={{ borderTop: '2px solid #1A3D4D', marginTop: 10, paddingTop: 10 }}>
+            <Fila icon="📊" label="VENTAS TOTALES" value={r.totalVentas} color="#1A3D4D" bold />
+          </div>
+        </div>
+
+        <div style={{ background: '#F2EBDC', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 10 }}>CAJA FÍSICA (EFECTIVO)</div>
+          <Fila label="Base de apertura" value={base} />
+          <Fila label="Ventas en efectivo" value={r.efectivo} />
+          <div style={{ borderTop: '1px solid #C8B987', marginTop: 6, paddingTop: 6 }}>
+            <Fila label="DEBE HABER EN CAJA" value={cajaEsperada} bold />
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
+          <MiniStat label="Cuentas cerradas" value={r.cuentasCerradas || 0} />
+          <MiniStat label="Productos" value={r.productosVendidos || 0} />
+          <MiniStat label="Por cobrar" value={(estado.cuentasPorCobrar || []).length} />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <button onClick={onVolver} style={btnSec}>← Volver</button>
+        <button onClick={onConfirmar} disabled={ocupado} style={{ ...btnPri, flex: 2, background: ocupado ? '#999' : '#1A3D4D', color: 'white' }}>{ocupado ? 'Cerrando…' : 'CERRAR TURNO DEFINITIVAMENTE'}</button>
+      </div>
+    </div>
+  );
+}
+
+function Fila({ icon, label, value, color, bold }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 0', fontSize: bold ? 15 : 13, fontWeight: bold ? 800 : 500 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        {icon && <span>{icon}</span>}
+        <span style={{ color: color || '#1A3D4D' }}>{label}</span>
+      </div>
+      <div style={{ color: color || '#1A3D4D' }}>{fmt(value)}</div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div style={{ background: '#F9F7F2', borderRadius: 10, padding: 10, textAlign: 'center' }}>
+      <div className="display" style={{ fontSize: 22, fontWeight: 800, color: '#1A3D4D' }}>{value}</div>
+      <div style={{ fontSize: 10, color: '#5C7785', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>{label}</div>
     </div>
   );
 }
@@ -505,7 +620,8 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
   const [cant, setCant] = useState(1);
   const [tipo, setTipo] = useState('split');
   const [individual, setIndividual] = useState(null);
-  const [seleccionados, setSeleccionados] = useState(cuenta.jugadores.map((j) => j.id));
+  const jugadores = cuenta.jugadores || [];
+  const [seleccionados, setSeleccionados] = useState(jugadores.map((j) => j.id));
   const filtrados = productos.filter((p) => p.categoria === cat);
   const producto = productos.find((p) => p.id === sel);
   const puede = producto && cant > 0 && (tipo === 'individual' ? individual : seleccionados.length > 0);
@@ -517,7 +633,7 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
       nombre_snapshot: producto.nombre,
       precio_unitario: producto.precio,
       cantidad: cant,
-      total: producto.precio * cant,
+      total: Number(producto.precio) * cant,
       tipo_asignacion: tipo,
       asignacion_jugadores: tipo === 'individual' ? [individual] : seleccionados,
     });
@@ -555,15 +671,15 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
           </div>
           {tipo === 'individual' ? (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 16 }}>
-              {cuenta.jugadores.map((j) => (
+              {jugadores.map((j) => (
                 <button key={j.id} onClick={() => setIndividual(j.id)} style={chip(individual === j.id)}>{j.nombre}</button>
               ))}
             </div>
           ) : (
             <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 11, color: '#5C7785', marginBottom: 6 }}>Se divide entre los seleccionados ({seleccionados.length} de {cuenta.jugadores.length})</div>
+              <div style={{ fontSize: 11, color: '#5C7785', marginBottom: 6 }}>Se divide entre los seleccionados ({seleccionados.length} de {jugadores.length})</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {cuenta.jugadores.map((j) => {
+                {jugadores.map((j) => {
                   const s = seleccionados.includes(j.id);
                   return <button key={j.id} onClick={() => setSeleccionados(s ? seleccionados.filter((x) => x !== j.id) : [...seleccionados, j.id])} style={chip(s)}>{s ? '✓ ' : ''}{j.nombre}</button>;
                 })}
@@ -593,8 +709,8 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
 
   async function confirmar() {
     if (!jugadorId || !metodo || !monto || Number(monto) <= 0) return;
-    const jugador = cuenta.jugadores.find((j) => j.id === jugadorId);
-    await onPagar({ jugador_id: jugadorId, jugador_nombre: jugador?.nombre, monto: Number(monto), metodo });
+    const jugador = (cuenta.jugadores || []).find((j) => j.id === jugadorId) || {};
+    await onPagar({ jugador_id: jugadorId, jugador_nombre: jugador.nombre, monto: Number(monto), metodo });
     setJugadorId(null); setMetodo(null); setMonto('');
   }
 
@@ -650,7 +766,7 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
   );
 }
 
-// ===== Componentes auxiliares =====
+// ===== Auxiliares =====
 function Kpi({ label, value, color, onClick }) {
   return (
     <div onClick={onClick} style={{ background: 'white', borderRadius: 14, padding: 14, boxShadow: '0 3px 12px rgba(0,0,0,0.04)', cursor: onClick ? 'pointer' : 'default', borderLeft: `4px solid ${color}` }}>
@@ -672,7 +788,7 @@ function Modal({ children, onClose }) {
   );
 }
 
-// ===== Estilos reutilizables =====
+// ===== Estilos =====
 const lbl = { fontSize: 12, fontWeight: 700, color: '#5C7785', textTransform: 'uppercase', letterSpacing: '0.05em' };
 const inp = { flex: 1, width: '100%', padding: '12px 14px', borderRadius: 10, border: '2px solid #E5E5E5', fontSize: 15, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' };
 const btnPri = { padding: 14, borderRadius: 12, border: 'none', fontWeight: 800, fontFamily: 'inherit', fontSize: 14, cursor: 'pointer' };

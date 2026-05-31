@@ -2,6 +2,7 @@ import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
 // Crear una cuenta con sus jugadores
 export async function POST(request) {
@@ -9,13 +10,12 @@ export async function POST(request) {
     const { turno_id, tipo, cancha_id, jugadores } = await request.json();
 
     if (!turno_id) {
-      return NextResponse.json({ error: 'No hay turno activo' }, { status: 400 });
+      return NextResponse.json({ error: 'No hay turno activo' }, { status: 400, ...noStore });
     }
     if (!jugadores || jugadores.length === 0) {
-      return NextResponse.json({ error: 'Se necesita al menos un jugador' }, { status: 400 });
+      return NextResponse.json({ error: 'Se necesita al menos un jugador' }, { status: 400, ...noStore });
     }
 
-    // Crear la cuenta
     const { data: cuenta, error } = await supabase
       .from('cuentas')
       .insert({ turno_id, tipo, cancha_id: cancha_id || null })
@@ -23,7 +23,6 @@ export async function POST(request) {
       .single();
     if (error) throw error;
 
-    // Crear los jugadores asociados
     const jugadoresRows = jugadores.map((nombre, i) => ({
       cuenta_id: cuenta.id,
       nombre,
@@ -35,11 +34,12 @@ export async function POST(request) {
       .select();
     if (e2) throw e2;
 
-    return NextResponse.json({
-      cuenta: { ...cuenta, jugadores: jugadoresData, consumos: [], pagos: [] },
-    });
+    return NextResponse.json(
+      { cuenta: { ...cuenta, jugadores: jugadoresData || [], consumos: [], pagos: [] } },
+      noStore
+    );
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }
 
@@ -52,8 +52,8 @@ export async function PATCH(request) {
       .update({ cerrada: true, fecha_cierre: new Date().toISOString() })
       .eq('id', cuentaId);
     if (error) throw error;
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true }, noStore);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }

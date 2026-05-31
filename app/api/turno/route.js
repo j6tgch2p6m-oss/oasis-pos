@@ -2,13 +2,14 @@ import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
 // Abrir un turno
 export async function POST(request) {
   try {
     const { cajera, base_caja } = await request.json();
     if (!cajera) {
-      return NextResponse.json({ error: 'Falta la cajera' }, { status: 400 });
+      return NextResponse.json({ error: 'Falta la cajera' }, { status: 400, ...noStore });
     }
     const { data, error } = await supabase
       .from('turnos')
@@ -16,9 +17,9 @@ export async function POST(request) {
       .select()
       .single();
     if (error) throw error;
-    return NextResponse.json({ turno: data });
+    return NextResponse.json({ turno: data }, noStore);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }
 
@@ -34,8 +35,8 @@ export async function PATCH(request) {
       })
       .eq('id', turnoId);
     if (error) throw error;
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true }, noStore);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }
