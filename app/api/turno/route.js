@@ -30,6 +30,19 @@ export async function PATCH(request) {
     if (!turnoId) {
       return NextResponse.json({ error: 'Falta turnoId' }, { status: 400, ...noStore });
     }
+    // No permitir cerrar el turno con cuentas abiertas: la caja debe cuadrar.
+    const { data: abiertas, error: errAbiertas } = await supabase
+      .from('cuentas')
+      .select('id')
+      .eq('turno_id', turnoId)
+      .eq('cerrada', false);
+    if (errAbiertas) throw errAbiertas;
+    if (abiertas && abiertas.length > 0) {
+      return NextResponse.json(
+        { error: `No puedes cerrar el turno: hay ${abiertas.length} cuenta(s) abierta(s). Cóbralas y ciérralas primero.` },
+        { status: 400, ...noStore }
+      );
+    }
     const cambios = { fecha_cierre: new Date().toISOString() };
     if (efectivo_contado_cierre !== undefined && efectivo_contado_cierre !== null) {
       cambios.efectivo_contado_cierre = efectivo_contado_cierre;
