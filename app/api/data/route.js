@@ -5,8 +5,6 @@ export const dynamic = 'force-dynamic';
 
 const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
-// Devuelve todo el estado del sistema. Usa lecturas SEPARADAS (no anidadas)
-// y las une en código: es más robusto y evita errores de relaciones.
 export async function GET() {
   try {
     // 1. Turno activo (sin fecha de cierre)
@@ -27,14 +25,19 @@ export async function GET() {
       .order('id');
     if (productosRes.error) throw productosRes.error;
 
-    // 3. Cuentas abiertas
-    const cuentasRes = await supabase
-      .from('cuentas')
-      .select('*')
-      .eq('cerrada', false)
-      .order('fecha_apertura');
-    if (cuentasRes.error) throw cuentasRes.error;
-    const cuentasBase = cuentasRes.data || [];
+    // 3. Cuentas abiertas del turno activo (solo si hay turno)
+    let cuentasBase = [];
+    if (turno) {
+      const cuentasRes = await supabase
+        .from('cuentas')
+        .select('*')
+        .eq('turno_id', turno.id)
+        .eq('cerrada', false)
+        .order('fecha_apertura');
+      if (cuentasRes.error) throw cuentasRes.error;
+      cuentasBase = cuentasRes.data || [];
+    }
+
     const cuentaIds = cuentasBase.map((c) => c.id);
 
     // 4. Hijos de esas cuentas (jugadores, consumos, pagos) en lecturas separadas
@@ -73,8 +76,7 @@ export async function GET() {
       .order('created_at', { ascending: false });
     if (cxcRes.error) throw cxcRes.error;
 
-    // 6. Resumen del turno activo (para el cierre de caja): todos los pagos
-    //    y consumos de TODAS las cuentas del turno (abiertas y cerradas).
+    // 6. Resumen del turno activo (para el cierre de caja)
     let resumenTurno = {
       efectivo: 0,
       transferencia: 0,
