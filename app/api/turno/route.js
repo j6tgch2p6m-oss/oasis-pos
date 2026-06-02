@@ -27,13 +27,14 @@ export async function POST(request) {
 export async function PATCH(request) {
   try {
     const { turnoId, efectivo_contado_cierre } = await request.json();
-    const { error } = await supabase
-      .from('turnos')
-      .update({
-        fecha_cierre: new Date().toISOString(),
-        efectivo_contado_cierre: efectivo_contado_cierre ?? null,
-      })
-      .eq('id', turnoId);
+    if (!turnoId) {
+      return NextResponse.json({ error: 'Falta turnoId' }, { status: 400, ...noStore });
+    }
+    const cambios = { fecha_cierre: new Date().toISOString() };
+    if (efectivo_contado_cierre !== undefined && efectivo_contado_cierre !== null) {
+      cambios.efectivo_contado_cierre = efectivo_contado_cierre;
+    }
+    const { error } = await supabase.from('turnos').update(cambios).eq('id', turnoId);
     if (error) throw error;
     return NextResponse.json({ ok: true }, noStore);
   } catch (e) {
