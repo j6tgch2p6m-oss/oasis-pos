@@ -62,6 +62,11 @@ function pagadoPorJugador(cuenta, jugadorId) {
     .filter((p) => p.jugador_id === jugadorId)
     .reduce((s, p) => s + (Number(p.monto) || 0), 0);
 }
+// Un saldo se considera pagado si falta menos de 1 peso. Los residuos de
+// centavos aparecen al dividir un total entre jugadores (ej. 10000/3).
+function saldado(pendiente) {
+  return (Number(pendiente) || 0) < 1;
+}
 
 // ============================================================================
 function fetchConTimeout(url, opciones = {}) {
@@ -393,6 +398,12 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
   const pagado = totalPagado(cuenta);
   const saldo = total - pagado;
   const desglose = desglosePorJugador(cuenta);
+  // La cuenta se puede cerrar cuando todos los jugadores quedaron saldados.
+  // Es más fiable que mirar el saldo total, que puede dejar residuos de
+  // redondeo (ej. 10000/3 = 9999 cobrado, 1 peso de diferencia).
+  const todosSaldados =
+    desglose.length > 0 &&
+    desglose.every((d) => saldado(d.total - pagadoPorJugador(cuenta, d.jugadorId)));
   const cancha = CANCHAS.find((c) => c.id === cuenta.cancha_id);
   const iconoProducto = (id) => (productos.find((p) => p.id === id) || {}).icono || '•';
 
@@ -419,7 +430,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 10, marginBottom: 20 }}>
         {desglose.map((d) => {
           const pj = pagadoPorJugador(cuenta, d.jugadorId);
-          const completo = d.total - pj <= 0 && d.total > 0;
+          const completo = saldado(d.total - pj) && d.total > 0;
           return (
             <div key={d.jugadorId} style={{ background: completo ? '#E8F5E9' : 'white', border: completo ? '2px solid #27AE60' : '2px solid #F0F0F0', borderRadius: 12, padding: 14, position: 'relative' }}>
               {completo && <div style={{ position: 'absolute', top: 10, right: 10, background: '#27AE60', color: 'white', borderRadius: '50%', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800 }}>✓</div>}
@@ -478,10 +489,13 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
         <button onClick={onAgregar} disabled={ocupado} style={{ ...btnPri, background: '#2E84A6', color: 'white' }}>+ AGREGAR PRODUCTO</button>
-        <button onClick={onCobrar} disabled={ocupado || saldo <= 0} style={{ ...btnPri, background: saldo > 0 ? '#1A3D4D' : '#CCC', color: 'white' }}>$ COBRAR</button>
+        <button onClick={onCobrar} disabled={ocupado || todosSaldados} style={{ ...btnPri, background: !todosSaldados ? '#1A3D4D' : '#CCC', color: 'white' }}>$ COBRAR</button>
       </div>
-      {saldo <= 0 && total > 0 && (
+      {todosSaldados && total > 0 && (
         <button onClick={onCerrar} disabled={ocupado} style={{ ...btnPri, width: '100%', background: 'linear-gradient(135deg,#27AE60,#229954)', color: 'white', fontSize: 15 }}>✓ CERRAR CUENTA Y LIBERAR CANCHA</button>
+      )}
+      {total === 0 && (
+        <button onClick={onCerrar} disabled={ocupado} style={{ ...btnPri, width: '100%', background: '#5C7785', color: 'white', fontSize: 15 }}>✕ CANCELAR CUENTA VACÍA Y LIBERAR CANCHA</button>
       )}
     </div>
   );
@@ -537,8 +551,8 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
       </div>
 
       {hayCuentasAbiertas && (
-        <div style={{ background: '#FEF3E2', border: '2px solid #F2B749', borderRadius: 12, padding: 14, marginBottom: 16, color: '#854F0B', fontSize: 13 }}>
-          ⚠ Tienes {cuentas.length} {cuentas.length === 1 ? 'cuenta abierta' : 'cuentas abiertas'} sin cerrar. Puedes cerrar el turno igual, pero lo recomendable es cobrar y cerrar esas cuentas primero.
+        <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 12, padding: 14, marginBottom: 16, color: '#791F1F', fontSize: 13 }}>
+          🔒 No puedes cerrar el turno todavía: tienes {cuentas.length} {cuentas.length === 1 ? 'cuenta abierta' : 'cuentas abiertas'}. Cobra (o fía) y cierra cada cuenta primero para que la caja cuadre.
         </div>
       )}
 
@@ -579,7 +593,7 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
 
       <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <button onClick={onVolver} style={btnSec}>← Volver</button>
-        <button onClick={onConfirmar} disabled={ocupado} style={{ ...btnPri, flex: 2, background: ocupado ? '#999' : '#1A3D4D', color: 'white' }}>{ocupado ? 'Cerrando…' : 'CERRAR TURNO DEFINITIVAMENTE'}</button>
+        <button onClick={onConfirmar} disabled={ocupado || hayCuentasAbiertas} style={{ ...btnPri, flex: 2, background: ocupado || hayCuentasAbiertas ? '#999' : '#1A3D4D', color: 'white' }}>{ocupado ? 'Cerrando…' : hayCuentasAbiertas ? 'CIERRA LAS CUENTAS PRIMERO' : 'CERRAR TURNO DEFINITIVAMENTE'}</button>
       </div>
     </div>
   );
@@ -726,7 +740,7 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
 
   const d = desglose.find((x) => x.jugadorId === jugadorId);
   const yaPagado = jugadorId ? pagadoPorJugador(cuenta, jugadorId) : 0;
-  const pendiente = d ? d.total - yaPagado : 0;
+  const pendiente = d ? Math.round(d.total - yaPagado) : 0;
 
   async function confirmar() {
     if (!jugadorId || !metodo || !monto || Number(monto) <= 0) return;
@@ -771,7 +785,7 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
         {desglose.map((d) => {
           const pj = pagadoPorJugador(cuenta, d.jugadorId);
           const pend = d.total - pj;
-          const completo = pend <= 0 && d.total > 0;
+          const completo = saldado(pend) && d.total > 0;
           return (
             <button key={d.jugadorId} onClick={() => !completo && d.total > 0 && setJugadorId(d.jugadorId)} disabled={completo || d.total === 0} style={{ padding: 14, borderRadius: 12, border: completo ? '2px solid #27AE60' : '2px solid #E5E5E5', background: completo ? '#E8F5E9' : 'white', cursor: completo || d.total === 0 ? 'default' : 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: 'inherit' }}>
               <div>
