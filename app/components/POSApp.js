@@ -64,6 +64,12 @@ function pagadoPorJugador(cuenta, jugadorId) {
 }
 
 // ============================================================================
+function fetchConTimeout(url, opciones = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  return fetch(url, { ...opciones, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
 export default function POSApp() {
   const [estado, setEstado] = useState(null);
   const [vista, setVista] = useState('home');
@@ -71,11 +77,12 @@ export default function POSApp() {
   const [modal, setModal] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
+  const [errorApi, setErrorApi] = useState(null);
   const [ocupado, setOcupado] = useState(false);
 
   async function cargarDatos() {
     try {
-      const res = await fetch('/api/data?t=' + Date.now(), { cache: 'no-store' });
+      const res = await fetchConTimeout('/api/data?t=' + Date.now(), { cache: 'no-store' });
       const json = await res.json();
       if (json.error) {
         setError(json.error);
@@ -84,7 +91,7 @@ export default function POSApp() {
         setError(null);
       }
     } catch (e) {
-      setError(e.message);
+      setError(e.name === 'AbortError' ? 'Tiempo de espera agotado. Revisa la conexión a Supabase.' : e.message);
     } finally {
       setCargando(false);
     }
@@ -96,22 +103,29 @@ export default function POSApp() {
 
   async function llamarApi(url, metodo, body) {
     setOcupado(true);
+    setErrorApi(null);
     try {
-      const res = await fetch(url + '?t=' + Date.now(), {
+      const res = await fetchConTimeout(url + '?t=' + Date.now(), {
         method: metodo,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         cache: 'no-store',
       });
-      const json = await res.json();
+      let json;
+      try {
+        json = await res.json();
+      } catch {
+        setErrorApi(`El servidor respondió con un error inesperado (HTTP ${res.status}). Revisa los logs de Vercel.`);
+        return null;
+      }
       if (json.error) {
-        alert('Error: ' + json.error);
+        setErrorApi('Error: ' + json.error);
         return null;
       }
       await cargarDatos();
       return json;
     } catch (e) {
-      alert('Error de conexión: ' + e.message);
+      setErrorApi(e.name === 'AbortError' ? 'La operación tardó demasiado (>15 s). Revisa la conexión a Supabase en Vercel.' : 'Error de red: ' + e.message);
       return null;
     } finally {
       setOcupado(false);
@@ -148,6 +162,13 @@ export default function POSApp() {
   return (
     <div style={{ minHeight: '100vh' }}>
       <Header turno={turno} vista={vistaSegura} onHome={() => { setVista('home'); setCuentaActivaId(null); }} />
+
+      {errorApi && (
+        <div style={{ background: '#FCEBEB', borderBottom: '2px solid #C0392B', padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ color: '#791F1F', fontSize: 13, fontWeight: 600 }}>⚠ {errorApi}</div>
+          <button onClick={() => setErrorApi(null)} style={{ background: 'transparent', border: 'none', color: '#C0392B', fontWeight: 800, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+        </div>
+      )}
 
       <div style={{ padding: 20, maxWidth: 1000, margin: '0 auto' }}>
         {!turno && (
