@@ -11,6 +11,18 @@ export async function POST(request) {
     if (!cajera) {
       return NextResponse.json({ error: 'Falta la cajera' }, { status: 400, ...noStore });
     }
+    // Evitar turnos duplicados: si ya hay uno abierto, no crear otro.
+    const { data: abiertos, error: errAbiertos } = await supabase
+      .from('turnos')
+      .select('id, cajera')
+      .is('fecha_cierre', null);
+    if (errAbiertos) throw errAbiertos;
+    if (abiertos && abiertos.length > 0) {
+      return NextResponse.json(
+        { error: `Ya hay un turno abierto (cajera: ${abiertos[0].cajera || '—'}). Ciérralo antes de abrir uno nuevo.` },
+        { status: 400, ...noStore }
+      );
+    }
     const { data, error } = await supabase
       .from('turnos')
       .insert({ cajera, base_caja: base_caja || 0 })
