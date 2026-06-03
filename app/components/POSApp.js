@@ -83,6 +83,7 @@ export default function POSApp() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
   const [errorApi, setErrorApi] = useState(null);
+  const [aviso, setAviso] = useState(null);
   const [ocupado, setOcupado] = useState(false);
 
   async function cargarDatos() {
@@ -109,6 +110,7 @@ export default function POSApp() {
   async function llamarApi(url, metodo, body) {
     setOcupado(true);
     setErrorApi(null);
+    setAviso(null);
     try {
       const res = await fetchConTimeout(url + '?t=' + Date.now(), {
         method: metodo,
@@ -135,6 +137,10 @@ export default function POSApp() {
       return json;
     } catch (e) {
       setErrorApi(e.name === 'AbortError' ? 'La operación tardó demasiado (>15 s). Revisa la conexión a Supabase en Vercel.' : 'Error de red: ' + e.message);
+      // La operación pudo COMPLETARSE en el servidor aunque el cliente no
+      // recibiera la respuesta (timeout o red). Re-sincronizamos para no quedar
+      // mostrando un estado viejo (ej.: "no hay turno" cuando sí se creó).
+      try { await cargarDatos(); } catch {}
       return null;
     } finally {
       setOcupado(false);
@@ -179,11 +185,36 @@ export default function POSApp() {
         </div>
       )}
 
+      {aviso && (
+        <div style={{ background: '#E8F4F8', borderBottom: '2px solid #2E84A6', padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ color: '#1A3D4D', fontSize: 13, fontWeight: 600 }}>ℹ {aviso}</div>
+          <button onClick={() => setAviso(null)} style={{ background: 'transparent', border: 'none', color: '#2E84A6', fontWeight: 800, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+        </div>
+      )}
+
       <div style={{ padding: 20, maxWidth: 1000, margin: '0 auto' }}>
         {!turno && (
           <VistaInicio
             ocupado={ocupado}
-            onAbrir={async (cajera, base) => { await llamarApi('/api/turno', 'POST', { cajera, base_caja: base }); setVista('home'); }}
+            onAbrir={async (cajera, base) => {
+              const r = await llamarApi('/api/turno', 'POST', { cajera, base_caja: base });
+              if (r?.adoptado) {
+                setAviso(`Ya había un turno abierto (cajera: ${r.turno?.cajera || '—'}). Lo retomé en lugar de crear uno nuevo. Si quieres empezar de cero, ciérralo y vuelve a abrir.`);
+              }
+              setVista('home');
+            }}
+            onForzarCierre={async () => {
+              const ok = typeof window !== 'undefined'
+                ? window.confirm('Esto cerrará cualquier turno (y sus cuentas) que haya quedado abierto, para que puedas empezar de cero. ¿Continuar?')
+                : true;
+              if (!ok) return;
+              const r = await llamarApi('/api/turno', 'PATCH', { cerrarTodo: true });
+              if (r?.ok) {
+                setAviso(r.cerrados > 0
+                  ? `Listo: cerré ${r.cerrados} turno(s) que estaban abiertos. Ya puedes abrir uno nuevo.`
+                  : 'No había ningún turno abierto. Ya puedes abrir uno nuevo.');
+              }
+            }}
           />
         )}
 
@@ -303,7 +334,7 @@ function Header({ turno, vista, onHome }) {
 }
 
 // ===== Vista: abrir turno =====
-function VistaInicio({ onAbrir, ocupado }) {
+function VistaInicio({ onAbrir, onForzarCierre, ocupado }) {
   const [cajera, setCajera] = useState('');
   const [base, setBase] = useState('');
   return (
@@ -323,6 +354,19 @@ function VistaInicio({ onAbrir, ocupado }) {
           <input type="number" value={base} onChange={(e) => setBase(e.target.value)} placeholder="50000" style={{ width: '100%', padding: '16px 18px 16px 34px', borderRadius: 10, border: '2px solid #E5E5E5', fontSize: 20, fontWeight: 700, outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }} />
         </div>
         <button onClick={() => cajera && base !== '' && onAbrir(cajera, Number(base))} disabled={!cajera || base === '' || ocupado} style={{ ...btnPri, width: '100%', background: cajera && base !== '' && !ocupado ? 'linear-gradient(135deg,#F2B749,#E8A82B)' : '#E5E5E5', color: cajera && base !== '' ? '#1A3D4D' : '#999', fontSize: 16 }}>{ocupado ? 'Abriendo…' : 'ABRIR TURNO →'}</button>
+      </div>
+
+      <div style={{ marginTop: 18, textAlign: 'center' }}>
+        <p style={{ color: '#8A7B5F', fontSize: 12, marginBottom: 8, lineHeight: 1.4 }}>
+          ¿Te dice <strong>“ya hay un turno abierto”</strong> pero no te deja entrar?
+        </p>
+        <button
+          onClick={onForzarCierre}
+          disabled={ocupado}
+          style={{ background: 'white', border: '2px solid #C0392B', color: '#C0392B', padding: '10px 16px', borderRadius: 10, fontWeight: 700, cursor: ocupado ? 'default' : 'pointer', fontSize: 13, fontFamily: 'inherit', opacity: ocupado ? 0.6 : 1 }}
+        >
+          {ocupado ? 'Procesando…' : '🔓 Cerrar turno abierto y empezar de cero'}
+        </button>
       </div>
     </div>
   );
