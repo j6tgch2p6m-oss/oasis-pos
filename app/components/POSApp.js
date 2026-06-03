@@ -250,8 +250,33 @@ export default function POSApp() {
             ocupado={ocupado}
             onAgregar={() => setModal({ tipo: 'agregarProducto' })}
             onCobrar={() => setModal({ tipo: 'cobrar' })}
-            onEliminarConsumo={async (consumoId) => { await llamarApi('/api/consumo', 'DELETE', { consumoId }); }}
-            onCerrar={async () => { await llamarApi('/api/cuenta', 'PATCH', { cuentaId: cuentaActiva.id }); setVista('home'); setCuentaActivaId(null); }}
+            onEliminarConsumo={async (consumoId) => {
+              const r = await llamarApi('/api/consumo', 'DELETE', { consumoId });
+              if (r?.ok) {
+                // Quitar el consumo de la cuenta activa de inmediato.
+                const cid = cuentaActiva.id;
+                setEstado((prev) => ({
+                  ...(prev || {}),
+                  cuentas: ((prev && prev.cuentas) || []).map((c) =>
+                    c.id === cid ? { ...c, consumos: (c.consumos || []).filter((x) => x.id !== consumoId) } : c
+                  ),
+                }));
+              }
+            }}
+            onCerrar={async () => {
+              const cid = cuentaActiva.id;
+              const r = await llamarApi('/api/cuenta', 'PATCH', { cuentaId: cid });
+              if (r?.ok) {
+                // Quitar la cuenta cerrada del estado de inmediato (libera la
+                // cancha en la vista) y volver a Inicio, sin depender de la recarga.
+                setEstado((prev) => ({
+                  ...(prev || {}),
+                  cuentas: ((prev && prev.cuentas) || []).filter((c) => c.id !== cid),
+                }));
+                setVista('home');
+                setCuentaActivaId(null);
+              }
+            }}
           />
         )}
 
@@ -290,7 +315,21 @@ export default function POSApp() {
               jugadores,
             });
             setModal(null);
-            if (r?.cuenta) { setCuentaActivaId(r.cuenta.id); setVista('cuenta'); }
+            if (r?.cuenta) {
+              // CLAVE: insertamos la cuenta nueva en el estado de inmediato
+              // (dedupe por id), SIN depender de la recarga de /api/data. Así
+              // cuentaActiva SIEMPRE existe y el "blindaje" no nos rebota a
+              // Inicio. Esta era la causa del bucle al abrir una cuenta.
+              setEstado((prev) => ({
+                ...(prev || {}),
+                cuentas: [
+                  ...(((prev && prev.cuentas) || []).filter((c) => c.id !== r.cuenta.id)),
+                  r.cuenta,
+                ],
+              }));
+              setCuentaActivaId(r.cuenta.id);
+              setVista('cuenta');
+            }
           }}
           onCancelar={() => setModal(null)}
         />
@@ -302,8 +341,20 @@ export default function POSApp() {
           productos={estado.productos}
           ocupado={ocupado}
           onAgregar={async (payload) => {
-            await llamarApi('/api/consumo', 'POST', { cuenta_id: cuentaActiva.id, ...payload });
+            const r = await llamarApi('/api/consumo', 'POST', { cuenta_id: cuentaActiva.id, ...payload });
             setModal(null);
+            if (r?.consumo) {
+              // Reflejar el consumo en su cuenta de inmediato (dedupe por id),
+              // sin depender de la recarga de /api/data.
+              setEstado((prev) => ({
+                ...(prev || {}),
+                cuentas: ((prev && prev.cuentas) || []).map((c) =>
+                  c.id === r.consumo.cuenta_id
+                    ? { ...c, consumos: [...((c.consumos || []).filter((x) => x.id !== r.consumo.id)), r.consumo] }
+                    : c
+                ),
+              }));
+            }
           }}
           onCancelar={() => setModal(null)}
         />
@@ -314,7 +365,42 @@ export default function POSApp() {
           cuenta={cuentaActiva}
           ocupado={ocupado}
           onPagar={async (payload) => {
-            await llamarApi('/api/pago', 'POST', { cuenta_id: cuentaActiva.id, ...payload });
+            const cid = cuentaActiva.id;
+            const r = await llamarApi('/api/pago', 'POST', { cuenta_id: cid, ...payload });
+            if (r?.pago) {
+              // Reflejar el pago en su cuenta de inmediato (dedupe por id) para
+              // que el jugador quede saldado y se habilite "cerrar cuenta",
+              // sin depender de la recarga de /api/data.
+              setEstado((prev) => {
+                if (!prev) return prev;
+                const cuentas = (prev.cuentas || []).map((c) =>
+                  c.id === cid
+                    ? { ...c, pagos: [...((c.pagos || []).filter((x) => x.id !== r.pago.id)), r.pago] }
+                    : c
+                );
+                // Si fue "fiado", reflejar también en "Por cobrar". El id real
+                // de la fila no lo devuelve el server; usamos una clave temporal
+                // que la próxima recarga real reemplaza por completo.
+                let cuentasPorCobrar = prev.cuentasPorCobrar || [];
+                if (payload.metodo === 'fiado') {
+                  const key = 'tmp-' + r.pago.id;
+                  cuentasPorCobrar = [
+                    ...cuentasPorCobrar.filter((x) => x.id !== key),
+                    {
+                      id: key,
+                      cuenta_id: cid,
+                      jugador_id: payload.jugador_id,
+                      jugador_nombre: payload.jugador_nombre || 'Sin nombre',
+                      monto: payload.monto,
+                      saldo_pendiente: payload.monto,
+                      cobrado: false,
+                      created_at: new Date().toISOString(),
+                    },
+                  ];
+                }
+                return { ...prev, cuentas, cuentasPorCobrar };
+              });
+            }
           }}
           onCerrar={() => setModal(null)}
         />
