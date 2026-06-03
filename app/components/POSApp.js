@@ -125,6 +125,10 @@ export default function POSApp() {
       }
       if (json.error) {
         setErrorApi('Error: ' + json.error);
+        // Re-sincronizar SIEMPRE con el estado real del servidor, incluso al
+        // fallar. Así la pantalla nunca se queda mostrando algo que contradice
+        // la base de datos (ej.: "no hay turno" en pantalla pero sí en la BD).
+        await cargarDatos();
         return null;
       }
       await cargarDatos();
