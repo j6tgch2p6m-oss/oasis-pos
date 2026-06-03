@@ -281,7 +281,11 @@ export default function POSApp() {
         )}
 
         {turno && vistaSegura === 'porCobrar' && (
-          <VistaPorCobrar estado={estado} />
+          <VistaPorCobrar
+            estado={estado}
+            ocupado={ocupado}
+            onCobrar={(cxc) => setModal({ tipo: 'cobrarDeuda', cxc })}
+          />
         )}
 
         {turno && vistaSegura === 'cierre' && (
@@ -403,6 +407,35 @@ export default function POSApp() {
             }
           }}
           onCerrar={() => setModal(null)}
+        />
+      )}
+
+      {modal?.tipo === 'cobrarDeuda' && modal.cxc && turno && (
+        <ModalCobrarDeuda
+          cxc={modal.cxc}
+          ocupado={ocupado}
+          onCancelar={() => setModal(null)}
+          onCobrar={async (metodo) => {
+            const cxc = modal.cxc;
+            const r = await llamarApi('/api/cobrar', 'POST', { cxcId: cxc.id, metodo, turno_id: turno.id });
+            setModal(null);
+            if (r?.ok) {
+              setEstado((prev) => {
+                if (!prev) return prev;
+                // Quitar la deuda de "Por cobrar" (ya quedó saldada) y reflejar
+                // el ingreso en el cierre como "cobro de deudas" del turno actual,
+                // sin depender de la recarga de /api/data.
+                const cuentasPorCobrar = (prev.cuentasPorCobrar || []).filter((x) => x.id !== cxc.id);
+                const prevRes = prev.resumenTurno || {};
+                const prevCobro = prevRes.cobroDeudas || { efectivo: 0, transferencia: 0, tarjeta: 0, total: 0 };
+                const monto = Number(cxc.monto) || 0;
+                const cobroDeudas = { ...prevCobro };
+                if (cobroDeudas[metodo] !== undefined) cobroDeudas[metodo] += monto;
+                cobroDeudas.total = (Number(prevCobro.total) || 0) + monto;
+                return { ...prev, cuentasPorCobrar, resumenTurno: { ...prevRes, cobroDeudas } };
+              });
+            }
+          }}
         />
       )}
     </div>
@@ -655,7 +688,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
 }
 
 // ===== Vista: por cobrar =====
-function VistaPorCobrar({ estado }) {
+function VistaPorCobrar({ estado, onCobrar, ocupado }) {
   const lista = estado.cuentasPorCobrar || [];
   const total = lista.reduce((s, c) => s + (Number(c.monto) || 0), 0);
   return (
@@ -669,16 +702,29 @@ function VistaPorCobrar({ estado }) {
         <div style={{ background: 'rgba(255,255,255,0.5)', border: '2px dashed #C8B987', borderRadius: 14, padding: 32, textAlign: 'center', color: '#8A7B5F' }}>✨ No hay deudas pendientes.</div>
       ) : (
         <div style={{ background: 'white', borderRadius: 14, padding: 6 }}>
-          {lista.map((c) => (
-            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, borderBottom: '1px solid #F0F0F0' }}>
-              <div style={{ width: 38, height: 38, borderRadius: '50%', background: '#FFE4E1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>⚠</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>{c.jugador_nombre}</div>
-                <div style={{ fontSize: 11, color: '#5C7785' }}>{c.created_at ? new Date(c.created_at).toLocaleDateString('es-CO') : ''}</div>
+          {lista.map((c) => {
+            // Las deudas optimistas (clave "tmp-…") aún no tienen id real en la
+            // BD; no se pueden cobrar hasta que /api/data las traiga de verdad.
+            const esTemporal = String(c.id).startsWith('tmp-');
+            return (
+              <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, borderBottom: '1px solid #F0F0F0' }}>
+                <div style={{ width: 38, height: 38, borderRadius: '50%', background: '#FFE4E1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>⚠</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{c.jugador_nombre}</div>
+                  <div style={{ fontSize: 11, color: '#5C7785' }}>{c.created_at ? new Date(c.created_at).toLocaleDateString('es-CO') : ''}</div>
+                </div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: '#C0392B' }}>{fmt(c.monto)}</div>
+                <button
+                  onClick={() => !esTemporal && onCobrar && onCobrar(c)}
+                  disabled={ocupado || esTemporal}
+                  title={esTemporal ? 'Espera unos segundos a que se sincronice esta deuda para poder cobrarla' : ''}
+                  style={{ background: esTemporal ? '#E5E5E5' : '#27AE60', color: esTemporal ? '#999' : 'white', border: 'none', padding: '8px 12px', borderRadius: 9, fontWeight: 700, fontSize: 12, cursor: ocupado || esTemporal ? 'default' : 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                >
+                  Cobrar
+                </button>
               </div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: '#C0392B' }}>{fmt(c.monto)}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -692,7 +738,11 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
   const cuentas = estado.cuentas || [];
   const base = Number(turno.base_caja) || 0;
   const efectivo = Number(r.efectivo) || 0;
-  const cajaEsperada = base + efectivo;
+  // Cobro de deudas de cartera hechas HOY: entra a caja pero no es venta de hoy.
+  const cobro = r.cobroDeudas || { efectivo: 0, transferencia: 0, tarjeta: 0, total: 0 };
+  const cobroEfectivo = Number(cobro.efectivo) || 0;
+  const cobroTotal = Number(cobro.total) || 0;
+  const cajaEsperada = base + efectivo + cobroEfectivo;
   const hayCuentasAbiertas = cuentas.length > 0;
   const hoy = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
 
@@ -728,10 +778,24 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
           </div>
         </div>
 
+        {cobroTotal > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 4 }}>COBRO DE DEUDAS (DE OTROS DÍAS)</div>
+            <div style={{ fontSize: 10, color: '#8A7B5F', marginBottom: 8, lineHeight: 1.4 }}>Ventas fiadas en días anteriores que se cobraron HOY. No cuentan como venta de hoy, pero el dinero sí entró hoy a la caja.</div>
+            <Fila icon="💵" label="Efectivo" value={cobro.efectivo} color="#27AE60" />
+            <Fila icon="🔁" label="Transferencia" value={cobro.transferencia} color="#2E84A6" />
+            <Fila icon="💳" label="Tarjeta" value={cobro.tarjeta} color="#8E44AD" />
+            <div style={{ borderTop: '1px dashed #C8B987', marginTop: 8, paddingTop: 8 }}>
+              <Fila icon="📥" label="TOTAL COBRADO DE CARTERA" value={cobro.total} color="#1A3D4D" bold />
+            </div>
+          </div>
+        )}
+
         <div style={{ background: '#F2EBDC', borderRadius: 12, padding: 14, marginBottom: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 10 }}>CAJA FÍSICA (EFECTIVO)</div>
           <Fila label="Base de apertura" value={base} />
           <Fila label="Ventas en efectivo" value={r.efectivo} />
+          {cobroEfectivo > 0 && <Fila label="Cobro de deudas en efectivo" value={cobroEfectivo} />}
           <div style={{ borderTop: '1px solid #C8B987', marginTop: 6, paddingTop: 6 }}>
             <Fila label="DEBE HABER EN CAJA" value={cajaEsperada} bold />
           </div>
@@ -949,6 +1013,36 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
             </button>
           );
         })}
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Modal: cobrar una deuda de cartera =====
+function ModalCobrarDeuda({ cxc, onCobrar, onCancelar, ocupado }) {
+  const [metodo, setMetodo] = useState(null);
+  // No se puede saldar una deuda con otra deuda: se excluye "fiado".
+  const metodos = METODOS.filter((m) => m.v !== 'fiado');
+  return (
+    <Modal onClose={onCancelar}>
+      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>Cobrar deuda</div>
+      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 16 }}>Registra el pago de una venta fiada de días anteriores. Entra a la caja de HOY como “cobro de deudas”, no como venta de hoy.</p>
+      <div style={{ background: '#F2EBDC', borderRadius: 12, padding: 14, marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>{cxc.jugador_nombre}</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
+          <span style={{ fontSize: 12, color: '#5C7785' }}>Monto a cobrar</span>
+          <span className="display" style={{ fontSize: 24, fontWeight: 800, color: '#C0392B' }}>{fmt(cxc.monto)}</span>
+        </div>
+      </div>
+      <label style={lbl}>¿Cómo te pagó?</label>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 7, margin: '6px 0 16px' }}>
+        {metodos.map((m) => (
+          <button key={m.v} onClick={() => setMetodo(m.v)} style={{ padding: 12, borderRadius: 10, border: metodo === m.v ? `2px solid ${m.color}` : '2px solid #E5E5E5', background: metodo === m.v ? m.color : 'white', color: metodo === m.v ? 'white' : '#1A3D4D', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>{m.icon} {m.label}</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onCancelar} style={btnSec}>Cancelar</button>
+        <button onClick={() => metodo && onCobrar(metodo)} disabled={!metodo || ocupado} style={{ ...btnPri, flex: 2, background: metodo && !ocupado ? '#27AE60' : '#E5E5E5', color: metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : 'CONFIRMAR COBRO →'}</button>
       </div>
     </Modal>
   );
