@@ -86,18 +86,26 @@ export default function POSApp() {
   const [aviso, setAviso] = useState(null);
   const [ocupado, setOcupado] = useState(false);
 
-  async function cargarDatos() {
+  // esRecarga=true  -> refresco tras una acción: si falla NO rompemos la
+  //                    pantalla (solo avisamos), para no perder lo que ya se ve.
+  // esRecarga=false -> carga inicial: si falla mostramos la pantalla de error.
+  async function cargarDatos({ esRecarga = false } = {}) {
     try {
       const res = await fetchConTimeout('/api/data?t=' + Date.now(), { cache: 'no-store' });
       const json = await res.json();
       if (json.error) {
-        setError(json.error);
-      } else {
-        setEstado(json);
-        setError(null);
+        if (esRecarga) setErrorApi('No se pudieron refrescar los datos: ' + json.error);
+        else setError(json.error);
+        return false;
       }
+      setEstado(json);
+      setError(null);
+      return true;
     } catch (e) {
-      setError(e.name === 'AbortError' ? 'Tiempo de espera agotado. Revisa la conexión a Supabase.' : e.message);
+      const msg = e.name === 'AbortError' ? 'Tiempo de espera agotado. Revisa la conexión a Supabase.' : e.message;
+      if (esRecarga) setErrorApi('No se pudieron refrescar los datos: ' + msg);
+      else setError(msg);
+      return false;
     } finally {
       setCargando(false);
     }
@@ -127,20 +135,19 @@ export default function POSApp() {
       }
       if (json.error) {
         setErrorApi('Error: ' + json.error);
-        // Re-sincronizar SIEMPRE con el estado real del servidor, incluso al
-        // fallar. Así la pantalla nunca se queda mostrando algo que contradice
-        // la base de datos (ej.: "no hay turno" en pantalla pero sí en la BD).
-        await cargarDatos();
+        // Re-sincronizar con el estado real del servidor, incluso al fallar.
+        // Es un refresco (no rompe la pantalla si a su vez falla la recarga).
+        await cargarDatos({ esRecarga: true });
         return null;
       }
-      await cargarDatos();
+      await cargarDatos({ esRecarga: true });
       return json;
     } catch (e) {
       setErrorApi(e.name === 'AbortError' ? 'La operación tardó demasiado (>15 s). Revisa la conexión a Supabase en Vercel.' : 'Error de red: ' + e.message);
       // La operación pudo COMPLETARSE en el servidor aunque el cliente no
       // recibiera la respuesta (timeout o red). Re-sincronizamos para no quedar
       // mostrando un estado viejo (ej.: "no hay turno" cuando sí se creó).
-      try { await cargarDatos(); } catch {}
+      try { await cargarDatos({ esRecarga: true }); } catch {}
       return null;
     } finally {
       setOcupado(false);
@@ -198,10 +205,17 @@ export default function POSApp() {
             ocupado={ocupado}
             onAbrir={async (cajera, base) => {
               const r = await llamarApi('/api/turno', 'POST', { cajera, base_caja: base });
-              if (r?.adoptado) {
-                setAviso(`Ya había un turno abierto (cajera: ${r.turno?.cajera || '—'}). Lo retomé en lugar de crear uno nuevo. Si quieres empezar de cero, ciérralo y vuelve a abrir.`);
+              // CLAVE: si el servidor confirma un turno, lo reflejamos de
+              // inmediato en el estado, SIN depender de la recarga de /api/data.
+              // Así la pantalla SIEMPRE avanza cuando el turno existe en el
+              // servidor (esta era la causa de quedarse en "Abriendo…").
+              if (r?.turno) {
+                setEstado((prev) => ({ ...(prev || {}), turno: r.turno }));
+                setVista('home');
+                if (r.adoptado) {
+                  setAviso(`Ya había un turno abierto (cajera: ${r.turno?.cajera || '—'}). Lo retomé en lugar de crear uno nuevo. Si quieres empezar de cero, ciérralo y vuelve a abrir.`);
+                }
               }
-              setVista('home');
             }}
             onForzarCierre={async () => {
               const ok = typeof window !== 'undefined'
@@ -250,9 +264,14 @@ export default function POSApp() {
             estado={estado}
             ocupado={ocupado}
             onConfirmar={async () => {
-              await llamarApi('/api/turno', 'PATCH', { turnoId: turno.id });
-              setVista('home');
-              setCuentaActivaId(null);
+              const r = await llamarApi('/api/turno', 'PATCH', { turnoId: turno.id });
+              if (r?.ok) {
+                // Reflejar el cierre de inmediato: sin turno volvemos a la
+                // pantalla de inicio aunque la recarga de /api/data falle.
+                setEstado((prev) => ({ ...(prev || {}), turno: null, cuentas: [] }));
+                setVista('home');
+                setCuentaActivaId(null);
+              }
             }}
             onVolver={() => setVista('home')}
           />
