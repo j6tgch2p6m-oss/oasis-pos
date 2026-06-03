@@ -40,12 +40,16 @@ export async function GET() {
       totalVentas: 0,
       cuentasCerradas: 0,
       productosVendidos: 0,
+      // Cobro de deudas (cartera) hechas DURANTE este turno. Son ingresos del
+      // día, pero corresponden a ventas fiadas de días anteriores: se muestran
+      // aparte en el cierre y NO se cuentan como venta del día.
+      cobroDeudas: { efectivo: 0, transferencia: 0, tarjeta: 0, total: 0 },
     };
 
     if (turno) {
       // Ola 2: cuentas ABIERTAS (para la vista) + TODAS las del turno (para el
       // resumen de cierre), en paralelo.
-      const [abiertasRes, todasRes] = await Promise.all([
+      const [abiertasRes, todasRes, cobrosRes] = await Promise.all([
         supabase
           .from('cuentas')
           .select('*')
@@ -53,9 +57,16 @@ export async function GET() {
           .eq('cerrada', false)
           .order('fecha_apertura'),
         supabase.from('cuentas').select('id, cerrada').eq('turno_id', turno.id),
+        // Deudas de cartera cobradas EN este turno (ingreso del día).
+        supabase
+          .from('cuentas_por_cobrar')
+          .select('metodo_cobro, monto')
+          .eq('turno_cobro_id', turno.id)
+          .eq('cobrado', true),
       ]);
       if (abiertasRes.error) throw abiertasRes.error;
       if (todasRes.error) throw todasRes.error;
+      if (cobrosRes.error) throw cobrosRes.error;
 
       const cuentasBase = abiertasRes.data || [];
       const cuentaIds = cuentasBase.map((c) => c.id);
@@ -102,6 +113,15 @@ export async function GET() {
         (s, c) => s + (Number(c.cantidad) || 0),
         0
       );
+
+      // Cobro de deudas de cartera hechas en este turno, por método.
+      (cobrosRes.data || []).forEach((r) => {
+        const monto = Number(r.monto) || 0;
+        if (resumenTurno.cobroDeudas[r.metodo_cobro] !== undefined) {
+          resumenTurno.cobroDeudas[r.metodo_cobro] += monto;
+        }
+        resumenTurno.cobroDeudas.total += monto;
+      });
     }
 
     return NextResponse.json(
