@@ -71,7 +71,7 @@ function saldado(pendiente) {
 // ============================================================================
 function fetchConTimeout(url, opciones = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
+  const timer = setTimeout(() => ctrl.abort(), 20000);
   return fetch(url, { ...opciones, signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
 
@@ -96,16 +96,16 @@ export default function POSApp() {
       if (json.error) {
         if (esRecarga) setErrorApi('No se pudieron refrescar los datos: ' + json.error);
         else setError(json.error);
-        return false;
+        return null;
       }
       setEstado(json);
       setError(null);
-      return true;
+      return json;
     } catch (e) {
       const msg = e.name === 'AbortError' ? 'Tiempo de espera agotado. Revisa la conexión a Supabase.' : e.message;
       if (esRecarga) setErrorApi('No se pudieron refrescar los datos: ' + msg);
       else setError(msg);
-      return false;
+      return null;
     } finally {
       setCargando(false);
     }
@@ -312,10 +312,11 @@ export default function POSApp() {
           canchaId={modal.canchaId}
           ocupado={ocupado}
           onCrear={async (jugadores) => {
+            const canchaId = modal.canchaId;
             const r = await llamarApi('/api/cuenta', 'POST', {
               turno_id: turno.id,
-              tipo: modal.canchaId ? 'cancha' : 'individual',
-              cancha_id: modal.canchaId,
+              tipo: canchaId ? 'cancha' : 'individual',
+              cancha_id: canchaId,
               jugadores,
             });
             setModal(null);
@@ -333,6 +334,26 @@ export default function POSApp() {
               }));
               setCuentaActivaId(r.cuenta.id);
               setVista('cuenta');
+              return;
+            }
+            // No llegó respuesta del POST (timeout, 504 de Vercel o red caída),
+            // pero la cuenta PUDO crearse igual en el servidor (es justo lo que
+            // pasaba: la cuenta queda abierta en la BD y al usuario lo dejaba en
+            // el inicio). En vez de abandonarlo ahí, recargamos el estado real y,
+            // si aparece una cuenta abierta que coincide, entramos a ella. Si de
+            // verdad no se creó nada, no hay candidata y se queda en home con el
+            // aviso de error visible.
+            const data = await cargarDatos({ esRecarga: true });
+            const candidatas = ((data && data.cuentas) || []).filter((c) =>
+              canchaId ? c.cancha_id === canchaId : c.tipo === 'individual' && !c.cancha_id
+            );
+            const nueva = candidatas
+              .slice()
+              .sort((a, b) => new Date(b.fecha_apertura) - new Date(a.fecha_apertura))[0];
+            if (nueva) {
+              setCuentaActivaId(nueva.id);
+              setVista('cuenta');
+              setErrorApi(null); // la apertura sí surtió efecto: quitamos el aviso
             }
           }}
           onCancelar={() => setModal(null)}
