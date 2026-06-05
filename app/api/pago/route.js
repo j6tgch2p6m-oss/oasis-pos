@@ -25,23 +25,66 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Método de pago inválido' }, { status: 400, ...noStore });
     }
 
-    const { data: pago, error } = await supabase
-      .from('pagos')
-      .insert({ cuenta_id, jugador_id: jugador_id || null, monto: montoNum, metodo })
-      .select()
-      .single();
-    if (error) throw error;
+    // --- Bloqueo de SOBREPAGO ---
+    // No existe "abono" parcial a una deuda: cobrar de más solo descuadra la
+    // caja. Calculamos el saldo que admite este pago y lo rechazamos si lo
+    // excede. Tolerancia de <1 peso por los residuos de las divisiones (split),
+    // coherente con la regla "saldado" del frontend.
+    // Nota: usamos .select('*') a propósito (las proyecciones multi-columna en
+    // este postgrest devuelven [] en silencio).
+    const [consumosRes, pagosRes] = await Promise.all([
+      supabase.from('consumos').select('*').eq('cuenta_id', cuenta_id),
+      supabase.from('pagos').select('*').eq('cuenta_id', cuenta_id),
+    ]);
+    if (consumosRes.error) throw consumosRes.error;
+    if (pagosRes.error) throw pagosRes.error;
+    const consumos = consumosRes.data || [];
+    const pagos = pagosRes.data || [];
 
-    if (metodo === 'fiado') {
-      const { error: e2 } = await supabase.from('cuentas_por_cobrar').insert({
-        cuenta_id,
-        jugador_id: jugador_id || null,
-        jugador_nombre: jugador_nombre || 'Sin nombre',
-        monto: montoNum,
-        saldo_pendiente: montoNum,
-      });
-      if (e2) throw e2;
+    let saldoMax; // cuánto falta por pagar (tope para este pago)
+    if (jugador_id) {
+      // Cuota del jugador = sus consumos individuales + su parte de los splits
+      // (mismo cálculo que desglosePorJugador en el frontend).
+      let cuota = 0;
+      for (const c of consumos) {
+        const ids = Array.isArray(c.asignacion_jugadores) ? c.asignacion_jugadores : [];
+        const total = Number(c.total) || 0;
+        if (c.tipo_asignacion === 'individual') {
+          if (ids[0] === jugador_id) cuota += total;
+        } else if (ids.length > 0 && ids.includes(jugador_id)) {
+          cuota += total / ids.length;
+        }
+      }
+      const yaPagado = pagos
+        .filter((p) => p.jugador_id === jugador_id)
+        .reduce((s, p) => s + (Number(p.monto) || 0), 0);
+      saldoMax = cuota - yaPagado;
+    } else {
+      // Sin jugador asociado: tope = total de la cuenta menos lo ya pagado.
+      const totalCuenta = consumos.reduce((s, c) => s + (Number(c.total) || 0), 0);
+      const totalPagado = pagos.reduce((s, p) => s + (Number(p.monto) || 0), 0);
+      saldoMax = totalCuenta - totalPagado;
     }
+
+    if (montoNum - saldoMax >= 1) {
+      const permitido = Math.max(0, Math.round(saldoMax));
+      return NextResponse.json(
+        { error: `El pago excede el saldo pendiente (máximo ${permitido}). No se permite sobrepago.` },
+        { status: 400, ...noStore }
+      );
+    }
+
+    // Atomicidad: el pago y (si es fiado) su deuda se crean en UNA sola
+    // transacción (rpc). Antes eran dos INSERT separados y un fallo parcial
+    // dejaba un fiado sin su deuda, o una deuda sin su pago.
+    const { data: pago, error } = await supabase.rpc('crear_pago', {
+      p_cuenta_id: cuenta_id,
+      p_jugador_id: jugador_id || null,
+      p_jugador_nombre: jugador_nombre || null,
+      p_monto: montoNum,
+      p_metodo: metodo,
+    });
+    if (error) throw error;
 
     return NextResponse.json({ pago }, noStore);
   } catch (e) {
