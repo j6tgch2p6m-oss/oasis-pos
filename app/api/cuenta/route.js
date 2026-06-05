@@ -29,26 +29,22 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Se necesita al menos un jugador' }, { status: 400, ...noStore });
     }
 
-    const { data: cuenta, error } = await supabase
-      .from('cuentas')
-      .insert({ turno_id, tipo, cancha_id: cancha_id || null })
-      .select()
-      .single();
+    // Atomicidad: la cuenta y sus jugadores se crean dentro de UNA sola
+    // transacción (rpc). Antes eran dos INSERT separados y, si el segundo
+    // fallaba, quedaba una cuenta vacía huérfana.
+    const { data, error } = await supabase.rpc('crear_cuenta_con_jugadores', {
+      p_turno_id: turno_id,
+      p_tipo: tipo,
+      p_cancha_id: cancha_id || null,
+      p_jugadores: nombresLimpios,
+    });
     if (error) throw error;
 
-    const jugadoresRows = nombresLimpios.map((nombre, i) => ({
-      cuenta_id: cuenta.id,
-      nombre,
-      orden: i,
-    }));
-    const { data: jugadoresData, error: e2 } = await supabase
-      .from('jugadores')
-      .insert(jugadoresRows)
-      .select();
-    if (e2) throw e2;
+    const cuenta = data && data.cuenta ? data.cuenta : null;
+    const jugadoresData = (data && data.jugadores) || [];
 
     return NextResponse.json(
-      { cuenta: { ...cuenta, jugadores: jugadoresData || [], consumos: [], pagos: [] } },
+      { cuenta: { ...cuenta, jugadores: jugadoresData, consumos: [], pagos: [] } },
       noStore
     );
   } catch (e) {
