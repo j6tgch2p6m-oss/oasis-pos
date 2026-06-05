@@ -28,14 +28,20 @@ export async function POST(request) {
     if (!Number.isInteger(cantidadNum) || cantidadNum <= 0) {
       return NextResponse.json({ error: 'La cantidad debe ser un entero mayor que cero' }, { status: 400, ...noStore });
     }
-    const precioNum = body.precio_unitario == null ? null : Number(body.precio_unitario);
-    if (precioNum != null && !Number.isFinite(precioNum)) {
+    // precio_unitario y total son NOT NULL en la BD: si llegaban nulos, el insert
+    // devolvía un 500 ("violates not-null constraint"). Validamos aquí para
+    // responder siempre un 400 claro y nunca un 500 por datos incompletos.
+    const precioNum = Number(body.precio_unitario);
+    if (!Number.isFinite(precioNum) || precioNum < 0) {
       return NextResponse.json({ error: 'Precio unitario inválido' }, { status: 400, ...noStore });
     }
-    const totalNum = body.total == null ? null : Number(body.total);
-    if (totalNum != null && !Number.isFinite(totalNum)) {
+    const totalNum = Number(body.total);
+    if (!Number.isFinite(totalNum) || totalNum < 0) {
       return NextResponse.json({ error: 'Total del consumo inválido' }, { status: 400, ...noStore });
     }
+    // asignacion_jugadores es jsonb NOT NULL: normalizamos a arreglo ([] si no
+    // llega) para no violar la restricción ni romper el cálculo de split.
+    const asignacion = Array.isArray(asignacion_jugadores) ? asignacion_jugadores : [];
 
     const { data, error } = await supabase
       .from('consumos')
@@ -47,7 +53,7 @@ export async function POST(request) {
         cantidad: cantidadNum,
         total: totalNum,
         tipo_asignacion,
-        asignacion_jugadores: asignacion_jugadores ?? null,
+        asignacion_jugadores: asignacion,
       })
       .select()
       .single();
@@ -62,6 +68,9 @@ export async function POST(request) {
 export async function DELETE(request) {
   try {
     const { consumoId } = await request.json();
+    if (!consumoId) {
+      return NextResponse.json({ error: 'Falta el consumo a eliminar' }, { status: 400, ...noStore });
+    }
     const { error } = await supabase.from('consumos').delete().eq('id', consumoId);
     if (error) throw error;
     return NextResponse.json({ ok: true }, noStore);
