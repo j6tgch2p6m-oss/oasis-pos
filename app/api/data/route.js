@@ -2,6 +2,11 @@ import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+// Vercel (plan Hobby) mata las funciones a los 10 s por defecto y devuelve un
+// 504 en HTML (sin JSON), lo que el cliente ve como "respuesta inesperada".
+// Subimos el límite a 30 s (el tope del plan es 60 s) para dar margen a los
+// arranques en frío de Supabase. Cada query interna ya aborta a los 12 s.
+export const maxDuration = 30;
 
 const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 

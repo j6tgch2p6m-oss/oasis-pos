@@ -143,7 +143,7 @@ export default function POSApp() {
       await cargarDatos({ esRecarga: true });
       return json;
     } catch (e) {
-      setErrorApi(e.name === 'AbortError' ? 'La operación tardó demasiado (>15 s). Revisa la conexión a Supabase en Vercel.' : 'Error de red: ' + e.message);
+      setErrorApi(e.name === 'AbortError' ? 'La operación tardó demasiado (>20 s). Revisa la conexión a Supabase en Vercel.' : 'Error de red: ' + e.message);
       // La operación pudo COMPLETARSE en el servidor aunque el cliente no
       // recibiera la respuesta (timeout o red). Re-sincronizamos para no quedar
       // mostrando un estado viejo (ej.: "no hay turno" cuando sí se creó).
@@ -344,8 +344,24 @@ export default function POSApp() {
             // verdad no se creó nada, no hay candidata y se queda en home con el
             // aviso de error visible.
             const data = await cargarDatos({ esRecarga: true });
-            const candidatas = ((data && data.cuentas) || []).filter((c) =>
-              canchaId ? c.cancha_id === canchaId : c.tipo === 'individual' && !c.cancha_id
+            // Para no entrar a la cuenta equivocada, exigimos que la candidata
+            // tenga EXACTAMENTE los mismos jugadores que acabamos de pedir y que
+            // se haya abierto hace muy poco (< 2 min). Así, si había otra cuenta
+            // suelta abierta, no la confundimos con la que intentábamos crear.
+            const nombresPedidos = (jugadores || [])
+              .map((n) => String(n == null ? '' : n).trim())
+              .filter(Boolean)
+              .sort();
+            const mismaLista = (c) => {
+              const ns = ((c.jugadores || []).map((j) => String(j.nombre).trim())).sort();
+              return ns.length === nombresPedidos.length && ns.every((n, i) => n === nombresPedidos[i]);
+            };
+            const recien = (c) => Date.now() - new Date(c.fecha_apertura).getTime() < 120000;
+            const candidatas = ((data && data.cuentas) || []).filter(
+              (c) =>
+                (canchaId ? c.cancha_id === canchaId : c.tipo === 'individual' && !c.cancha_id) &&
+                mismaLista(c) &&
+                recien(c)
             );
             const nueva = candidatas
               .slice()

@@ -2,6 +2,8 @@ import { supabase } from '../../../lib/supabase';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+// Margen ante arranques en frío de Supabase: 30 s (tope del plan Hobby: 60 s).
+export const maxDuration = 30;
 const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
 // No se puede saldar una deuda con otra deuda: solo medios reales de cobro.
