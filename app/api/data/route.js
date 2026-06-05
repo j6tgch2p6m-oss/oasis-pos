@@ -52,69 +52,72 @@ export async function GET() {
     };
 
     if (turno) {
-      // Ola 2: cuentas ABIERTAS (para la vista) + TODAS las del turno (para el
-      // resumen de cierre), en paralelo.
-      const [abiertasRes, todasRes, cobrosRes] = await Promise.all([
+      // IMPORTANTE — por qué TODO usa .select('*'):
+      // En este despliegue (postgrest-js 2.106.2) las proyecciones de varias
+      // columnas como .select('id, cerrada') o .select('metodo, monto')
+      // devolvían un arreglo VACÍO (sin lanzar error). Eso dejaba idsTurno en
+      // [] y el resumenTurno en 0 (totalVentas, productosVendidos,
+      // cuentasCerradas) y cobroDeudas en 0 aunque sí hubiera pagos/cobros:
+      // ese era el "descuadre de caja" al cerrar el turno. .select('*') sí
+      // funciona de forma fiable, así que leemos columnas completas y
+      // calculamos en JS.
+
+      // Ola 2: TODAS las cuentas del turno (una sola lectura; de aquí salen
+      // tanto las abiertas para la vista como los ids para el resumen) +
+      // deudas de cartera cobradas EN este turno (ingreso del día).
+      const [cuentasRes, cobrosRes] = await Promise.all([
         supabase
           .from('cuentas')
           .select('*')
           .eq('turno_id', turno.id)
-          .eq('cerrada', false)
           .order('fecha_apertura'),
-        supabase.from('cuentas').select('id, cerrada').eq('turno_id', turno.id),
-        // Deudas de cartera cobradas EN este turno (ingreso del día).
         supabase
           .from('cuentas_por_cobrar')
-          .select('metodo_cobro, monto')
+          .select('*')
           .eq('turno_cobro_id', turno.id)
           .eq('cobrado', true),
       ]);
-      if (abiertasRes.error) throw abiertasRes.error;
-      if (todasRes.error) throw todasRes.error;
+      if (cuentasRes.error) throw cuentasRes.error;
       if (cobrosRes.error) throw cobrosRes.error;
 
-      const cuentasBase = abiertasRes.data || [];
-      const cuentaIds = cuentasBase.map((c) => c.id);
-      const cuentasTurno = todasRes.data || [];
+      const cuentasTurno = cuentasRes.data || [];
       const idsTurno = cuentasTurno.map((c) => c.id);
+      const cuentasBase = cuentasTurno.filter((c) => !c.cerrada);
+      const cuentaIds = cuentasBase.map((c) => c.id);
       resumenTurno.cuentasCerradas = cuentasTurno.filter((c) => c.cerrada).length;
 
-      // Ola 3: hijos de las cuentas abiertas (jugadores/consumos/pagos) +
-      // agregados del turno (pagos/consumos), todo en paralelo. Si no hay ids
-      // resolvemos vacío sin pegarle a la BD.
+      // Ola 3: jugadores de las cuentas ABIERTAS + pagos y consumos de TODO el
+      // turno (para el resumen). Los hijos de cada cuenta abierta se derivan
+      // filtrando estos mismos resultados, porque cuentaIds ⊆ idsTurno.
       const vacio = Promise.resolve({ data: [], error: null });
-      const [jRes, coRes, pRes, pagosTRes, consumosTRes] = await Promise.all([
+      const [jRes, pagosTRes, consumosTRes] = await Promise.all([
         cuentaIds.length ? supabase.from('jugadores').select('*').in('cuenta_id', cuentaIds) : vacio,
-        cuentaIds.length ? supabase.from('consumos').select('*').in('cuenta_id', cuentaIds) : vacio,
-        cuentaIds.length ? supabase.from('pagos').select('*').in('cuenta_id', cuentaIds) : vacio,
-        idsTurno.length ? supabase.from('pagos').select('metodo, monto').in('cuenta_id', idsTurno) : vacio,
-        idsTurno.length ? supabase.from('consumos').select('cantidad').in('cuenta_id', idsTurno) : vacio,
+        idsTurno.length ? supabase.from('pagos').select('*').in('cuenta_id', idsTurno) : vacio,
+        idsTurno.length ? supabase.from('consumos').select('*').in('cuenta_id', idsTurno) : vacio,
       ]);
       if (jRes.error) throw jRes.error;
-      if (coRes.error) throw coRes.error;
-      if (pRes.error) throw pRes.error;
       if (pagosTRes.error) throw pagosTRes.error;
       if (consumosTRes.error) throw consumosTRes.error;
 
       const jugadores = jRes.data || [];
-      const consumos = coRes.data || [];
-      const pagos = pRes.data || [];
+      const pagosTurno = pagosTRes.data || [];
+      const consumosTurno = consumosTRes.data || [];
 
       cuentas = cuentasBase.map((c) => ({
         ...c,
         jugadores: jugadores
           .filter((j) => j.cuenta_id === c.id)
           .sort((a, b) => (a.orden || 0) - (b.orden || 0)),
-        consumos: consumos.filter((co) => co.cuenta_id === c.id),
-        pagos: pagos.filter((p) => p.cuenta_id === c.id),
+        consumos: consumosTurno.filter((co) => co.cuenta_id === c.id),
+        pagos: pagosTurno.filter((p) => p.cuenta_id === c.id),
       }));
 
-      (pagosTRes.data || []).forEach((p) => {
+      pagosTurno.forEach((p) => {
         const monto = Number(p.monto) || 0;
         if (resumenTurno[p.metodo] !== undefined) resumenTurno[p.metodo] += monto;
         resumenTurno.totalVentas += monto;
       });
-      resumenTurno.productosVendidos = (consumosTRes.data || []).reduce(
+      resumenTurno.productosVendidos = consumosTurno.reduce(
         (s, c) => s + (Number(c.cantidad) || 0),
         0
       );
