@@ -38,8 +38,28 @@ function fechaBogota(date) {
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 
+// Catálogo de canchas (igual que el POS: app/components/POSApp.js).
+const CANCHAS = [
+  { id: 'C1', nombre: 'Cancha 1' },
+  { id: 'C2', nombre: 'Cancha 2' },
+];
+
 function sumar(arr, getter) {
   return arr.reduce((s, x) => s + (Number(getter(x)) || 0), 0);
+}
+
+// Normaliza un nombre para agrupar clientes ("  santiago  " == "Santiago").
+function normalizaNombre(s) {
+  return (s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+function tituloNombre(s) {
+  return s
+    .split(' ')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ''))
+    .join(' ');
+}
+function diasDesde(iso) {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / (24 * 3600 * 1000));
 }
 
 // GET /api/admin/data
@@ -63,29 +83,56 @@ export async function GET() {
     //  - todas las cuentas (para conteo de hoy + ticket histórico)
     //  - cartera pendiente (total por cobrar)
     //  - consumos del mes (top productos del mes)
-    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes] = await Promise.all([
-      supabase
-        .from('turnos')
-        .select('*')
-        .is('fecha_cierre', null)
-        .order('fecha_apertura', { ascending: false })
-        .limit(1),
-      supabase.from('pagos').select('*').order('created_at', { ascending: false }),
-      supabase.from('cuentas').select('*'),
-      supabase.from('cuentas_por_cobrar').select('*').eq('cobrado', false),
-      supabase.from('consumos').select('*').gte('created_at', inicioMes.toISOString()),
-    ]);
+    //  - último turno cerrado (alerta de descuadre de caja)
+    //  - jugadores (nombres para canchas en vivo y top clientes)
+    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes, ultCierreRes, jugadoresRes] =
+      await Promise.all([
+        supabase
+          .from('turnos')
+          .select('*')
+          .is('fecha_cierre', null)
+          .order('fecha_apertura', { ascending: false })
+          .limit(1),
+        supabase.from('pagos').select('*').order('created_at', { ascending: false }),
+        supabase.from('cuentas').select('*'),
+        supabase.from('cuentas_por_cobrar').select('*').eq('cobrado', false),
+        supabase.from('consumos').select('*').gte('created_at', inicioMes.toISOString()),
+        supabase
+          .from('turnos')
+          .select('*')
+          .not('fecha_cierre', 'is', null)
+          .order('fecha_cierre', { ascending: false })
+          .limit(1),
+        supabase.from('jugadores').select('*'),
+      ]);
     if (turnoRes.error) throw turnoRes.error;
     if (pagosRes.error) throw pagosRes.error;
     if (cuentasRes.error) throw cuentasRes.error;
     if (cxcRes.error) throw cxcRes.error;
     if (consumosRes.error) throw consumosRes.error;
+    if (ultCierreRes.error) throw ultCierreRes.error;
+    if (jugadoresRes.error) throw jugadoresRes.error;
 
     const turno = turnoRes.data && turnoRes.data.length ? turnoRes.data[0] : null;
     const pagos = pagosRes.data || [];
     const cuentas = cuentasRes.data || [];
     const cxc = cxcRes.data || [];
     const consumosMes = consumosRes.data || [];
+    const ultCierre = ultCierreRes.data && ultCierreRes.data.length ? ultCierreRes.data[0] : null;
+    const jugadores = jugadoresRes.data || [];
+
+    // Ola 2: cobros de cartera hechos DURANTE el último turno cerrado
+    // (entran a la caja en efectivo y cuentan para el descuadre).
+    let cobrosUltCierre = [];
+    if (ultCierre) {
+      const cobrosRes = await supabase
+        .from('cuentas_por_cobrar')
+        .select('*')
+        .eq('turno_cobro_id', ultCierre.id)
+        .eq('cobrado', true);
+      if (cobrosRes.error) throw cobrosRes.error;
+      cobrosUltCierre = cobrosRes.data || [];
+    }
 
     const enRango = (iso, ini, fin) => {
       const t = new Date(iso).getTime();
@@ -184,6 +231,118 @@ export async function GET() {
       .sort((a, b) => b.total - a.total)
       .slice(0, 6);
 
+    // ---- ALERTA A: descuadre de caja del último cierre ----
+    let alertaCaja = null;
+    if (ultCierre) {
+      const idsLC = new Set(cuentas.filter((c) => c.turno_id === ultCierre.id).map((c) => c.id));
+      const efePagos = sumar(
+        pagos.filter((p) => idsLC.has(p.cuenta_id) && p.metodo === 'efectivo'),
+        (p) => p.monto
+      );
+      const efeCobros = sumar(
+        cobrosUltCierre.filter((r) => r.metodo_cobro === 'efectivo'),
+        (r) => r.monto
+      );
+      const esperado = (Number(ultCierre.base_caja) || 0) + efePagos + efeCobros;
+      const contado =
+        ultCierre.efectivo_contado_cierre == null
+          ? null
+          : Number(ultCierre.efectivo_contado_cierre);
+      alertaCaja = {
+        cajera: ultCierre.cajera,
+        fechaCierre: ultCierre.fecha_cierre,
+        esperado,
+        contado,
+        diferencia: contado == null ? null : contado - esperado,
+      };
+    }
+
+    // ---- ALERTA B: deuda más antigua sin cobrar ----
+    const cxcOrden = [...cxc].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    const deudaMasAntigua = cxcOrden[0]
+      ? {
+          nombre: cxcOrden[0].jugador_nombre,
+          saldo: Number(cxcOrden[0].saldo_pendiente) || 0,
+          dias: diasDesde(cxcOrden[0].created_at),
+        }
+      : null;
+
+    // ---- CANCHAS EN VIVO ----
+    let canchasVivo = CANCHAS.map((k) => ({ ...k, ocupada: false }));
+    if (turno) {
+      const abiertasCancha = cuentas.filter(
+        (c) => c.turno_id === turno.id && !c.cerrada && c.tipo === 'cancha'
+      );
+      canchasVivo = CANCHAS.map((k) => {
+        const cu = abiertasCancha.find((c) => c.cancha_id === k.id);
+        if (!cu) return { ...k, ocupada: false };
+        const jug = jugadores
+          .filter((j) => j.cuenta_id === cu.id)
+          .sort((a, b) => (a.orden || 0) - (b.orden || 0))
+          .map((j) => j.nombre);
+        return {
+          ...k,
+          ocupada: true,
+          jugadores: jug,
+          minutos: Math.max(0, Math.round((Date.now() - new Date(cu.fecha_apertura).getTime()) / 60000)),
+        };
+      });
+    }
+
+    // ---- LISTA POR COBRAR (cartera, más antigua primero) ----
+    const listaPorCobrar = cxcOrden.map((r) => ({
+      nombre: r.jugador_nombre,
+      saldo: Number(r.saldo_pendiente) || 0,
+      dias: diasDesde(r.created_at),
+    }));
+
+    // ---- TOP CLIENTES DEL MES (por gasto, nombre normalizado) ----
+    const pagosMes = pagos.filter(
+      (p) => p.created_at && new Date(p.created_at).getTime() >= inicioMes.getTime()
+    );
+    const nombrePorId = {};
+    jugadores.forEach((j) => {
+      nombrePorId[j.id] = j.nombre;
+    });
+    const acumCli = {};
+    pagosMes.forEach((p) => {
+      const nombreRaw = p.jugador_id ? nombrePorId[p.jugador_id] : null;
+      if (!nombreRaw) return; // pago sin jugador asignado
+      const key = normalizaNombre(nombreRaw);
+      if (!key) return;
+      if (!acumCli[key]) acumCli[key] = { nombre: tituloNombre(key), total: 0, pagos: 0 };
+      acumCli[key].total += Number(p.monto) || 0;
+      acumCli[key].pagos += 1;
+    });
+    const topClientesMes = Object.values(acumCli)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 6);
+
+    // ---- PROYECCIÓN DEL MES ----
+    const ventasMes = sumar(pagosMes, (p) => p.monto);
+    const localNow = new Date(ahora.getTime() + BOGOTA_OFFSET_MIN * 60000);
+    const diaDelMes = localNow.getUTCDate();
+    const diasMes = new Date(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 0).getDate();
+    const proyeccionMes = {
+      acumulado: ventasMes,
+      proyectado: diaDelMes > 0 ? Math.round((ventasMes / diaDelMes) * diasMes) : 0,
+      diaDelMes,
+      diasMes,
+    };
+
+    // ---- OCUPACIÓN POR HORA (cuentas de cancha, histórico) ----
+    const ocupacionHora = Array.from({ length: 24 }, (_, h) => ({ hora: h, cuentas: 0 }));
+    cuentas
+      .filter((c) => c.tipo === 'cancha' && c.fecha_apertura)
+      .forEach((c) => {
+        const h = new Date(
+          new Date(c.fecha_apertura).getTime() + BOGOTA_OFFSET_MIN * 60000
+        ).getUTCHours();
+        ocupacionHora[h].cuentas += 1;
+      });
+
     return NextResponse.json(
       {
         generadoEn: ahora.toISOString(),
@@ -222,6 +381,19 @@ export async function GET() {
           metodosMes,
           topProductosMes,
         },
+        alertas: {
+          caja: alertaCaja,
+          deudaMasAntigua,
+        },
+        vivo: {
+          canchas: canchasVivo,
+        },
+        listas: {
+          porCobrar: listaPorCobrar,
+          topClientesMes,
+        },
+        proyeccionMes,
+        ocupacionHora,
       },
       noStore
     );

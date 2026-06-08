@@ -3,10 +3,17 @@
 import { useEffect, useState, useCallback } from 'react';
 import { C, fmt, card } from '../ui';
 import { LineaIngresos, DonaMetodos, TopProductos } from './Charts';
+import {
+  Alertas,
+  CanchasVivo,
+  ListaPorCobrar,
+  TopClientes,
+  ProyeccionMes,
+  OcupacionHora,
+} from './SeccionesVivas';
 
-// Fase 2-3: consume /api/admin/data (solo lectura) y muestra:
-//  - cabecera EN VIVO (cajera + turno)
-//  - 4 tarjetas KPI + 3 gráficas con datos reales de Supabase
+// Dashboard: consume /api/admin/data (solo lectura) y muestra cabecera EN VIVO,
+// alertas, 4 KPIs, 3 gráficas y secciones vivas, todo con datos reales.
 function Delta({ pct }) {
   if (pct === null || pct === undefined) {
     return <span style={{ fontSize: 12, color: C.textoTenue }}>sin dato semana pasada</span>;
@@ -188,6 +195,9 @@ export default function Dashboard() {
         </button>
       </div>
 
+      {/* Alertas accionables */}
+      <Alertas caja={data.alertas.caja} deuda={data.alertas.deudaMasAntigua} />
+
       {/* 4 KPIs */}
       <div
         style={{
@@ -238,6 +248,22 @@ export default function Dashboard() {
         <LineaIngresos serie={data.graficas.serie7d} promedio={data.graficas.promedio7d} />
         <DonaMetodos datos={data.graficas.metodosMes} />
         <TopProductos datos={data.graficas.topProductosMes} />
+      </div>
+
+      {/* Secciones vivas */}
+      <CanchasVivo canchas={data.vivo.canchas} />
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: 14,
+        }}
+      >
+        <ListaPorCobrar datos={data.listas.porCobrar} />
+        <TopClientes datos={data.listas.topClientesMes} />
+        <ProyeccionMes datos={data.proyeccionMes} />
+        <OcupacionHora datos={data.ocupacionHora} />
       </div>
 
       <div style={{ fontSize: 11, color: C.textoTenue, textAlign: 'right' }}>
