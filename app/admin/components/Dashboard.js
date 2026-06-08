@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { C, fmt, card } from '../ui';
+import { LineaIngresos, DonaMetodos, TopProductos } from './Charts';
 
-// Fase 2: consume /api/admin/data (solo lectura) y muestra:
+// Fase 2-3: consume /api/admin/data (solo lectura) y muestra:
 //  - cabecera EN VIVO (cajera + turno)
-//  - 4 tarjetas KPI con datos reales de Supabase
+//  - 4 tarjetas KPI + 3 gráficas con datos reales de Supabase
 function Delta({ pct }) {
   if (pct === null || pct === undefined) {
     return <span style={{ fontSize: 12, color: C.textoTenue }}>sin dato semana pasada</span>;
@@ -224,6 +225,19 @@ export default function Dashboard() {
           acento={C.rojo}
           pie={`${k.porCobrar.cantidad} deuda(s) pendiente(s)`}
         />
+      </div>
+
+      {/* Gráficas */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: 14,
+        }}
+      >
+        <LineaIngresos serie={data.graficas.serie7d} promedio={data.graficas.promedio7d} />
+        <DonaMetodos datos={data.graficas.metodosMes} />
+        <TopProductos datos={data.graficas.topProductosMes} />
       </div>
 
       <div style={{ fontSize: 11, color: C.textoTenue, textAlign: 'right' }}>
