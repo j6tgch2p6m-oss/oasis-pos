@@ -627,12 +627,10 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
   const pagado = totalPagado(cuenta);
   const saldo = total - pagado;
   const desglose = desglosePorJugador(cuenta);
-  // La cuenta se puede cerrar cuando todos los jugadores quedaron saldados.
-  // Es más fiable que mirar el saldo total, que puede dejar residuos de
-  // redondeo (ej. 10000/3 = 9999 cobrado, 1 peso de diferencia).
-  const todosSaldados =
-    desglose.length > 0 &&
-    desglose.every((d) => saldado(d.total - pagadoPorJugador(cuenta, d.jugadorId)));
+  // La cuenta se salda cuando lo abonado cubre el TOTAL, sin importar quién
+  // puso cuánto: una persona puede abonar de más y cubrir la parte de otro.
+  // El desglose por jugador es solo una referencia de cuánto le toca a cada uno.
+  const cuentaSaldada = total > 0 && saldado(total - pagado);
   const cancha = CANCHAS.find((c) => c.id === cuenta.cancha_id);
   const iconoProducto = (id) => (productos.find((p) => p.id === id) || {}).icono || '•';
 
@@ -706,9 +704,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
                   <div style={{ fontSize: 18 }}>{m.icon}</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, fontSize: 13 }}>{j.nombre || '?'}</div>
-                    <div style={{ fontSize: 11, color: '#5C7785' }}>
-                      {m.label}{p.pagado_por ? ` · pagó ${p.pagado_por}` : ''}
-                    </div>
+                    <div style={{ fontSize: 11, color: '#5C7785' }}>{m.label}</div>
                   </div>
                   <div style={{ fontWeight: 700, color: m.color, fontSize: 14 }}>{fmt(p.monto)}</div>
                 </div>
@@ -720,9 +716,9 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
         <button onClick={onAgregar} disabled={ocupado} style={{ ...btnPri, background: '#2E84A6', color: 'white' }}>+ AGREGAR PRODUCTO</button>
-        <button onClick={onCobrar} disabled={ocupado || todosSaldados} style={{ ...btnPri, background: !todosSaldados ? '#1A3D4D' : '#CCC', color: 'white' }}>$ COBRAR</button>
+        <button onClick={onCobrar} disabled={ocupado || cuentaSaldada} style={{ ...btnPri, background: !cuentaSaldada ? '#1A3D4D' : '#CCC', color: 'white' }}>$ COBRAR</button>
       </div>
-      {todosSaldados && total > 0 && (
+      {cuentaSaldada && (
         <button onClick={onCerrar} disabled={ocupado} style={{ ...btnPri, width: '100%', background: 'linear-gradient(135deg,#27AE60,#229954)', color: 'white', fontSize: 15 }}>✓ CERRAR CUENTA Y LIBERAR CANCHA</button>
       )}
       {total === 0 && (
@@ -994,130 +990,104 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
 }
 
 // ===== Modal: cobrar =====
+// Modelo de abono libre: el desglose por jugador es solo una referencia de
+// cuánto le toca a cada uno. Al cobrar, cada quien puede poner el monto que
+// quiera (incluso más de su parte) y todo se abona al TOTAL de la cuenta. La
+// cuenta se salda cuando lo abonado cubre el total.
 function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
   const desglose = desglosePorJugador(cuenta);
+  const total = totalCuenta(cuenta);
+  const pagado = totalPagado(cuenta);
+  const pendienteCuenta = Math.max(0, Math.round(total - pagado));
   const [jugadorId, setJugadorId] = useState(null);
   const [metodo, setMetodo] = useState(null);
   const [monto, setMonto] = useState('');
-  // Pagos ampliados: ids de OTROS jugadores que esta persona también paga.
-  const [cubiertos, setCubiertos] = useState([]);
 
   const d = desglose.find((x) => x.jugadorId === jugadorId);
   const yaPagado = jugadorId ? pagadoPorJugador(cuenta, jugadorId) : 0;
-  const pendiente = d ? Math.round(d.total - yaPagado) : 0;
-
-  // Otros jugadores que aún deben algo (candidatos a que alguien los cubra).
-  const otrosPendientes = desglose
-    .filter((x) => x.jugadorId !== jugadorId)
-    .map((x) => ({ ...x, pend: Math.round(x.total - pagadoPorJugador(cuenta, x.jugadorId)) }))
-    .filter((x) => x.total > 0 && !saldado(x.pend));
-  const totalCubiertos = otrosPendientes
-    .filter((x) => cubiertos.includes(x.jugadorId))
-    .reduce((s, x) => s + x.pend, 0);
-  const totalACobrar = (Number(monto) || 0) + totalCubiertos;
+  const parteJugador = d ? Math.round(d.total) : 0;
+  const pendienteJugador = d ? Math.max(0, Math.round(d.total - yaPagado)) : 0;
 
   function elegir(id) {
-    setJugadorId(id);
     setMetodo(null);
-    setMonto('');
-    setCubiertos([]);
+    setJugadorId(id);
+    // Sugerimos la parte pendiente del jugador, pero el monto es libre.
+    const dd = desglose.find((x) => x.jugadorId === id);
+    const yp = pagadoPorJugador(cuenta, id);
+    const pj = dd ? Math.max(0, Math.round(dd.total - yp)) : 0;
+    setMonto(pj ? String(pj) : '');
   }
 
   async function confirmar() {
     if (!jugadorId || !metodo || !monto || Number(monto) <= 0) return;
-    const nombreDe = (id) => ((cuenta.jugadores || []).find((j) => j.id === id) || {}).nombre;
-    const pagador = nombreDe(jugadorId);
-    // Pago propio del jugador + un pago por cada jugador que esté cubriendo.
-    const pagos = [{ jugador_id: jugadorId, jugador_nombre: pagador, monto: Number(monto), metodo }];
-    otrosPendientes
-      .filter((x) => cubiertos.includes(x.jugadorId))
-      .forEach((x) => {
-        pagos.push({
-          jugador_id: x.jugadorId,
-          jugador_nombre: x.nombre,
-          monto: x.pend,
-          metodo,
-          pagado_por: pagador,
-        });
-      });
-    await onPagar(pagos);
-    setJugadorId(null); setMetodo(null); setMonto(''); setCubiertos([]);
+    const jugador = (cuenta.jugadores || []).find((j) => j.id === jugadorId) || {};
+    await onPagar([{ jugador_id: jugadorId, jugador_nombre: jugador.nombre, monto: Number(monto), metodo }]);
+    setJugadorId(null); setMetodo(null); setMonto('');
   }
 
   if (jugadorId && d) {
+    const sobra = Number(monto) > pendienteCuenta && pendienteCuenta >= 0;
     return (
       <Modal onClose={onCerrar}>
-        <button onClick={() => setJugadorId(null)} style={{ background: 'transparent', border: 'none', color: '#5C7785', cursor: 'pointer', marginBottom: 10, fontSize: 12 }}>← Cambiar jugador</button>
-        <div style={{ fontSize: 11, color: '#5C7785', fontWeight: 700 }}>COBRANDO A</div>
+        <button onClick={() => setJugadorId(null)} style={{ background: 'transparent', border: 'none', color: '#5C7785', cursor: 'pointer', marginBottom: 10, fontSize: 12 }}>← Cambiar persona</button>
+        <div style={{ fontSize: 11, color: '#5C7785', fontWeight: 700 }}>ABONA</div>
         <div className="display" style={{ fontSize: 24, fontWeight: 800, marginBottom: 14 }}>{d.nombre}</div>
         <div style={{ background: '#F2EBDC', borderRadius: 12, padding: 14, marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}><span>Total a cargo:</span><strong>{fmt(d.total)}</strong></div>
-          {yaPagado > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3, color: '#27AE60' }}><span>Ya pagado:</span><strong>{fmt(yaPagado)}</strong></div>}
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 15, fontWeight: 800, marginTop: 5, paddingTop: 5, borderTop: '1px solid #C8B987' }}><span>Pendiente:</span><span>{fmt(pendiente)}</span></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}><span>Su parte:</span><strong>{fmt(parteJugador)}</strong></div>
+          {yaPagado > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3, color: '#27AE60' }}><span>Ya abonó:</span><strong>{fmt(yaPagado)}</strong></div>}
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 15, fontWeight: 800, marginTop: 5, paddingTop: 5, borderTop: '1px solid #C8B987' }}><span>Falta en la cuenta:</span><span style={{ color: '#C0392B' }}>{fmt(pendienteCuenta)}</span></div>
         </div>
-        <label style={lbl}>Monto a cobrar</label>
+        <label style={lbl}>Monto a abonar (libre)</label>
         <div style={{ position: 'relative', margin: '6px 0 4px' }}>
           <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
-          <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder={String(Math.round(pendiente))} style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
+          <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder={String(pendienteJugador || pendienteCuenta)} style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
         </div>
-        <button onClick={() => setMonto(String(Math.round(pendiente)))} style={{ background: 'transparent', border: 'none', color: '#2E84A6', cursor: 'pointer', fontWeight: 700, fontSize: 11, marginBottom: 14 }}>Cobrar total pendiente ({fmt(pendiente)})</button>
-
-        {otrosPendientes.length > 0 && (
-          <div style={{ marginBottom: 14 }}>
-            <label style={lbl}>¿Esta persona también paga por…?</label>
-            <p style={{ fontSize: 11, color: '#8A7B5F', margin: '4px 0 8px' }}>Marca a quién más le paga {d.nombre}. Se cobran con el mismo método y esos jugadores quedan saldados.</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {otrosPendientes.map((o) => {
-                const on = cubiertos.includes(o.jugadorId);
-                return (
-                  <button
-                    key={o.jugadorId}
-                    onClick={() => setCubiertos(on ? cubiertos.filter((x) => x !== o.jugadorId) : [...cubiertos, o.jugadorId])}
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderRadius: 10, border: on ? '2px solid #2E84A6' : '2px solid #E5E5E5', background: on ? '#E8F4F8' : 'white', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
-                  >
-                    <span style={{ fontWeight: 700, fontSize: 13, color: '#1A3D4D' }}>{on ? '✓ ' : ''}{o.nombre}</span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: '#C0392B' }}>{fmt(o.pend)}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 14 }}>
+          {pendienteJugador > 0 && (
+            <button onClick={() => setMonto(String(pendienteJugador))} style={{ background: 'transparent', border: 'none', color: '#2E84A6', cursor: 'pointer', fontWeight: 700, fontSize: 11 }}>Su parte ({fmt(pendienteJugador)})</button>
+          )}
+          {pendienteCuenta > 0 && (
+            <button onClick={() => setMonto(String(pendienteCuenta))} style={{ background: 'transparent', border: 'none', color: '#2E84A6', cursor: 'pointer', fontWeight: 700, fontSize: 11 }}>Saldar la cuenta ({fmt(pendienteCuenta)})</button>
+          )}
+        </div>
+        {sobra && Number(monto) > 0 && (
+          <div style={{ fontSize: 11, color: '#8A7B5F', marginBottom: 12 }}>Este abono cubre lo que falta y deja {fmt(Number(monto) - pendienteCuenta)} de más en la cuenta.</div>
         )}
-
-        {totalCubiertos > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#1A3D4D', color: 'white', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
-            <span style={{ fontSize: 12, fontWeight: 700 }}>Total a cobrar ({d.nombre} + {cubiertos.length} más)</span>
-            <span className="display" style={{ fontSize: 18, fontWeight: 800 }}>{fmt(totalACobrar)}</span>
-          </div>
-        )}
-
         <label style={lbl}>Método de pago</label>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 7, margin: '6px 0 16px' }}>
           {METODOS.map((m) => (
             <button key={m.v} onClick={() => setMetodo(m.v)} style={{ padding: 12, borderRadius: 10, border: metodo === m.v ? `2px solid ${m.color}` : '2px solid #E5E5E5', background: metodo === m.v ? m.color : 'white', color: metodo === m.v ? 'white' : '#1A3D4D', fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>{m.icon} {m.label}</button>
           ))}
         </div>
-        <button onClick={confirmar} disabled={!monto || !metodo || Number(monto) <= 0 || ocupado} style={{ ...btnPri, width: '100%', background: monto && metodo && Number(monto) > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: monto && metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : totalCubiertos > 0 ? `CONFIRMAR PAGO (${fmt(totalACobrar)}) →` : 'CONFIRMAR PAGO →'}</button>
+        <button onClick={confirmar} disabled={!monto || !metodo || Number(monto) <= 0 || ocupado} style={{ ...btnPri, width: '100%', background: monto && metodo && Number(monto) > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: monto && metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : 'CONFIRMAR ABONO →'}</button>
       </Modal>
     );
   }
 
   return (
     <Modal onClose={onCerrar}>
-      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>¿Quién va a pagar?</div>
-      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 16 }}>Selecciona el jugador y luego el método</p>
+      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>¿Quién abona?</div>
+      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 14 }}>El monto es libre: una persona puede poner más de su parte y se abona al total de la cuenta.</p>
+      <div style={{ background: '#1A3D4D', color: 'white', borderRadius: 12, padding: 14, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 12 }}>
+          <div style={{ opacity: 0.8 }}>Total {fmt(total)} · Abonado {fmt(pagado)}</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 10, opacity: 0.8, fontWeight: 700 }}>FALTA</div>
+          <div className="display" style={{ fontSize: 22, fontWeight: 800 }}>{fmt(pendienteCuenta)}</div>
+        </div>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
         {desglose.map((d) => {
           const pj = pagadoPorJugador(cuenta, d.jugadorId);
-          const pend = d.total - pj;
-          const completo = saldado(pend) && d.total > 0;
+          const completo = saldado(d.total - pj) && d.total > 0;
           return (
-            <button key={d.jugadorId} onClick={() => !completo && d.total > 0 && elegir(d.jugadorId)} disabled={completo || d.total === 0} style={{ padding: 14, borderRadius: 12, border: completo ? '2px solid #27AE60' : '2px solid #E5E5E5', background: completo ? '#E8F5E9' : 'white', cursor: completo || d.total === 0 ? 'default' : 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: 'inherit' }}>
+            <button key={d.jugadorId} onClick={() => d.total > 0 && elegir(d.jugadorId)} disabled={d.total === 0} style={{ padding: 14, borderRadius: 12, border: completo ? '2px solid #27AE60' : '2px solid #E5E5E5', background: completo ? '#E8F5E9' : 'white', cursor: d.total === 0 ? 'default' : 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: 'inherit' }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 14 }}>{d.nombre}</div>
-                <div style={{ fontSize: 11, color: '#5C7785', marginTop: 2 }}>{completo ? '✓ Pagado completo' : `Pendiente: ${fmt(pend)} de ${fmt(d.total)}`}</div>
+                <div style={{ fontSize: 11, color: '#5C7785', marginTop: 2 }}>Parte: {fmt(d.total)} · Abonado: {fmt(pj)}</div>
               </div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: completo ? '#27AE60' : '#1A3D4D' }}>{fmt(pend)}</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: completo ? '#27AE60' : '#1A3D4D' }}>{completo ? '✓' : '＋'}</div>
             </button>
           );
         })}
