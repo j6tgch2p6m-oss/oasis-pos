@@ -10,10 +10,12 @@ import {
   TopClientes,
   ProyeccionMes,
   OcupacionHora,
+  ReservasDescuentos,
 } from './SeccionesVivas';
 
-// Dashboard: consume /api/admin/data (solo lectura) y muestra cabecera EN VIVO,
-// alertas, 4 KPIs, 3 gráficas y secciones vivas, todo con datos reales.
+// Fase 2: consume /api/admin/data (solo lectura) y muestra:
+//  - cabecera EN VIVO (cajera + turno)
+//  - 4 tarjetas KPI con datos reales de Supabase
 function Delta({ pct }) {
   if (pct === null || pct === undefined) {
     return <span style={{ fontSize: 12, color: C.textoTenue }}>sin dato semana pasada</span>;
@@ -264,6 +266,7 @@ export default function Dashboard() {
         <TopClientes datos={data.listas.topClientesMes} />
         <ProyeccionMes datos={data.proyeccionMes} />
         <OcupacionHora datos={data.ocupacionHora} />
+        <ReservasDescuentos reservas={data.reservasMes} descuentos={data.descuentosMes} />
       </div>
 
       <div style={{ fontSize: 11, color: C.textoTenue, textAlign: 'right' }}>

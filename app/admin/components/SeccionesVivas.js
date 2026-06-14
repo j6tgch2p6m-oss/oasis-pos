@@ -294,3 +294,55 @@ export function OcupacionHora({ datos }) {
     </div>
   );
 }
+
+// Abonos de reserva y descuentos del mes.
+export function ReservasDescuentos({ reservas, descuentos }) {
+  const r = reservas || { total: 0, cantidad: 0 };
+  const d = descuentos || { total: 0, cantidad: 0, lista: [] };
+  return (
+    <div style={{ ...card, gridColumn: '1 / -1' }}>
+      <h3 style={seccionTitulo}>Reservas y descuentos · este mes</h3>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <div style={{ flex: '1 1 180px', borderRadius: 12, padding: 14, background: 'rgba(46,132,166,0.07)', border: `1px solid ${C.beigeBorde}` }}>
+          <div style={{ fontSize: 12, color: C.textoTenue, fontWeight: 700 }}>ABONOS DE RESERVA</div>
+          <div className="display" style={{ fontSize: 22, fontWeight: 800, color: C.petroleo }}>{fmt(r.total)}</div>
+          <div style={{ fontSize: 12, color: C.textoTenue }}>{r.cantidad} reserva(s)</div>
+        </div>
+        <div style={{ flex: '1 1 180px', borderRadius: 12, padding: 14, background: 'rgba(142,68,173,0.07)', border: `1px solid ${C.beigeBorde}` }}>
+          <div style={{ fontSize: 12, color: C.textoTenue, fontWeight: 700 }}>DESCUENTOS</div>
+          <div className="display" style={{ fontSize: 22, fontWeight: 800, color: C.morado }}>{fmt(d.total)}</div>
+          <div style={{ fontSize: 12, color: C.textoTenue }}>{d.cantidad} descuento(s)</div>
+        </div>
+      </div>
+      {d.lista && d.lista.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {d.lista.map((x, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '8px 0',
+                borderBottom: i < d.lista.length - 1 ? `1px solid ${C.beige}` : 'none',
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>
+                  {x.motivo}{x.nombre ? ` · ${x.nombre}` : ''}
+                </div>
+                <div style={{ fontSize: 11, color: C.textoTenue }}>
+                  {x.cajera ? `${x.cajera} · ` : ''}
+                  {new Date(x.fecha).toLocaleDateString('es-CO', { timeZone: 'America/Bogota', day: '2-digit', month: 'short' })}
+                </div>
+              </div>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.morado }}>−{fmt(x.monto)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ color: C.textoTenue, fontSize: 13 }}>Sin descuentos este mes.</div>
+      )}
+    </div>
+  );
+}
