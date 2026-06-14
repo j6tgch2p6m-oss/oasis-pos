@@ -8,85 +8,76 @@ const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } };
 
 const METODOS_PAGO = ['efectivo', 'transferencia', 'tarjeta', 'fiado'];
 
-// Registrar un pago. Si es "fiado", crea entrada en cuentas_por_cobrar.
+// Registrar uno o varios pagos de una misma cuenta.
+//
+// Soporta "pagos ampliados": un jugador puede pagar su parte y, en la misma
+// operación, cubrir la de otros. El cliente manda un arreglo `pagos`; cada
+// pago que cubre a otro jugador lleva `pagado_por` con el nombre de quien
+// puso el dinero. Cada pago "fiado" genera su entrada en cuentas_por_cobrar.
 export async function POST(request) {
   try {
-    const { cuenta_id, jugador_id, jugador_nombre, monto, metodo } = await request.json();
+    const body = await request.json();
+    const { cuenta_id } = body;
 
-    // Validación: evita 500 por violar restricciones de la BD y datos basura.
     if (!cuenta_id) {
       return NextResponse.json({ error: 'Falta la cuenta del pago' }, { status: 400, ...noStore });
     }
-    const montoNum = Number(monto);
-    if (!Number.isFinite(montoNum) || montoNum <= 0) {
-      return NextResponse.json({ error: 'El monto del pago debe ser un número mayor que cero' }, { status: 400, ...noStore });
-    }
-    if (!METODOS_PAGO.includes(metodo)) {
-      return NextResponse.json({ error: 'Método de pago inválido' }, { status: 400, ...noStore });
-    }
 
-    // --- Bloqueo de SOBREPAGO ---
-    // No existe "abono" parcial a una deuda: cobrar de más solo descuadra la
-    // caja. Calculamos el saldo que admite este pago y lo rechazamos si lo
-    // excede. Tolerancia de <1 peso por los residuos de las divisiones (split),
-    // coherente con la regla "saldado" del frontend.
-    // Nota: usamos .select('*') a propósito (las proyecciones multi-columna en
-    // este postgrest devuelven [] en silencio).
-    const [consumosRes, pagosRes] = await Promise.all([
-      supabase.from('consumos').select('*').eq('cuenta_id', cuenta_id),
-      supabase.from('pagos').select('*').eq('cuenta_id', cuenta_id),
-    ]);
-    if (consumosRes.error) throw consumosRes.error;
-    if (pagosRes.error) throw pagosRes.error;
-    const consumos = consumosRes.data || [];
-    const pagos = pagosRes.data || [];
+    // Aceptamos el formato nuevo (arreglo `pagos`) o el antiguo (un solo pago
+    // en campos sueltos), por si quedara un cliente viejo en vuelo al desplegar.
+    const entradas = Array.isArray(body.pagos) && body.pagos.length
+      ? body.pagos
+      : [{
+          jugador_id: body.jugador_id,
+          jugador_nombre: body.jugador_nombre,
+          monto: body.monto,
+          metodo: body.metodo,
+          pagado_por: body.pagado_por,
+        }];
 
-    let saldoMax; // cuánto falta por pagar (tope para este pago)
-    if (jugador_id) {
-      // Cuota del jugador = sus consumos individuales + su parte de los splits
-      // (mismo cálculo que desglosePorJugador en el frontend).
-      let cuota = 0;
-      for (const c of consumos) {
-        const ids = Array.isArray(c.asignacion_jugadores) ? c.asignacion_jugadores : [];
-        const total = Number(c.total) || 0;
-        if (c.tipo_asignacion === 'individual') {
-          if (ids[0] === jugador_id) cuota += total;
-        } else if (ids.length > 0 && ids.includes(jugador_id)) {
-          cuota += total / ids.length;
-        }
+    // Validación: evita 500 por violar restricciones de la BD y datos basura.
+    const filas = [];
+    for (const e of entradas) {
+      const montoNum = Number(e.monto);
+      if (!Number.isFinite(montoNum) || montoNum <= 0) {
+        return NextResponse.json({ error: 'El monto del pago debe ser un número mayor que cero' }, { status: 400, ...noStore });
       }
-      const yaPagado = pagos
-        .filter((p) => p.jugador_id === jugador_id)
-        .reduce((s, p) => s + (Number(p.monto) || 0), 0);
-      saldoMax = cuota - yaPagado;
-    } else {
-      // Sin jugador asociado: tope = total de la cuenta menos lo ya pagado.
-      const totalCuenta = consumos.reduce((s, c) => s + (Number(c.total) || 0), 0);
-      const totalPagado = pagos.reduce((s, p) => s + (Number(p.monto) || 0), 0);
-      saldoMax = totalCuenta - totalPagado;
+      if (!METODOS_PAGO.includes(e.metodo)) {
+        return NextResponse.json({ error: 'Método de pago inválido' }, { status: 400, ...noStore });
+      }
+      filas.push({
+        cuenta_id,
+        jugador_id: e.jugador_id || null,
+        monto: montoNum,
+        metodo: e.metodo,
+        // pagado_por: nombre de quien puso el dinero cuando cubre a otro
+        // jugador. Vacío cuando cada quien paga lo suyo.
+        pagado_por: e.pagado_por ? String(e.pagado_por).trim() : null,
+        // Guardamos el nombre para poder crear la deuda de cartera si es fiado.
+        _jugador_nombre: e.jugador_nombre || 'Sin nombre',
+      });
     }
 
-    if (montoNum - saldoMax >= 1) {
-      const permitido = Math.max(0, Math.round(saldoMax));
-      return NextResponse.json(
-        { error: `El pago excede el saldo pendiente (máximo ${permitido}). No se permite sobrepago.` },
-        { status: 400, ...noStore }
-      );
-    }
-
-    // Atomicidad: el pago y (si es fiado) su deuda se crean en UNA sola
-    // transacción (rpc). Antes eran dos INSERT separados y un fallo parcial
-    // dejaba un fiado sin su deuda, o una deuda sin su pago.
-    const { data: pago, error } = await supabase.rpc('crear_pago', {
-      p_cuenta_id: cuenta_id,
-      p_jugador_id: jugador_id || null,
-      p_jugador_nombre: jugador_nombre || null,
-      p_monto: montoNum,
-      p_metodo: metodo,
-    });
+    // Insertamos todos los pagos de una vez (sin el campo auxiliar _jugador_nombre).
+    const aInsertar = filas.map(({ _jugador_nombre, ...f }) => f);
+    const { data: pagos, error } = await supabase.from('pagos').insert(aInsertar).select();
     if (error) throw error;
 
-    return NextResponse.json({ pago }, noStore);
+    // Cada pago "fiado" genera una cuenta por cobrar a nombre del jugador.
+    const fiados = filas.filter((f) => f.metodo === 'fiado');
+    if (fiados.length) {
+      const cxc = fiados.map((f) => ({
+        cuenta_id,
+        jugador_id: f.jugador_id,
+        jugador_nombre: f._jugador_nombre,
+        monto: f.monto,
+        saldo_pendiente: f.monto,
+      }));
+      const { error: e2 } = await supabase.from('cuentas_por_cobrar').insert(cxc);
+      if (e2) throw e2;
+    }
+
+    return NextResponse.json({ pagos }, noStore);
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
