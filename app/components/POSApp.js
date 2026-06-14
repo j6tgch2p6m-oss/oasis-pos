@@ -28,6 +28,9 @@ function totalCuenta(cuenta) {
 function totalPagado(cuenta) {
   return (cuenta.pagos || []).reduce((s, p) => s + (Number(p.monto) || 0), 0);
 }
+function totalDescuentos(cuenta) {
+  return (cuenta.descuentos || []).reduce((s, d) => s + (Number(d.monto) || 0), 0);
+}
 function desglosePorJugador(cuenta) {
   const d = (cuenta.jugadores || []).map((j) => ({
     jugadorId: j.id,
@@ -250,6 +253,20 @@ export default function POSApp() {
             ocupado={ocupado}
             onAgregar={() => setModal({ tipo: 'agregarProducto' })}
             onCobrar={() => setModal({ tipo: 'cobrar' })}
+            onAbonoReserva={() => setModal({ tipo: 'abonoReserva' })}
+            onDescuento={() => setModal({ tipo: 'descuento' })}
+            onEliminarDescuento={async (descuentoId) => {
+              const cid = cuentaActiva.id;
+              const r = await llamarApi('/api/descuento', 'DELETE', { descuentoId });
+              if (r?.ok) {
+                setEstado((prev) => ({
+                  ...(prev || {}),
+                  cuentas: ((prev && prev.cuentas) || []).map((c) =>
+                    c.id === cid ? { ...c, descuentos: (c.descuentos || []).filter((x) => x.id !== descuentoId) } : c
+                  ),
+                }));
+              }
+            }}
             onEliminarConsumo={async (consumoId) => {
               const r = await llamarApi('/api/consumo', 'DELETE', { consumoId });
               if (r?.ok) {
@@ -453,6 +470,62 @@ export default function POSApp() {
         />
       )}
 
+      {modal?.tipo === 'abonoReserva' && cuentaActiva && (
+        <ModalAbonoReserva
+          cuenta={cuentaActiva}
+          ocupado={ocupado}
+          onCancelar={() => setModal(null)}
+          onConfirmar={async (monto, metodo) => {
+            const cid = cuentaActiva.id;
+            const pagos = [{ jugador_id: null, jugador_nombre: 'Abono de reserva', monto, metodo, es_reserva: true }];
+            const r = await llamarApi('/api/pago', 'POST', { cuenta_id: cid, pagos });
+            setModal(null);
+            if (r?.pagos) {
+              setEstado((prev) => {
+                if (!prev) return prev;
+                const idsNuevos = new Set(r.pagos.map((p) => p.id));
+                const cuentas = (prev.cuentas || []).map((c) =>
+                  c.id === cid
+                    ? { ...c, pagos: [...((c.pagos || []).filter((x) => !idsNuevos.has(x.id))), ...r.pagos] }
+                    : c
+                );
+                return { ...prev, cuentas };
+              });
+            }
+          }}
+        />
+      )}
+
+      {modal?.tipo === 'descuento' && cuentaActiva && (
+        <ModalDescuento
+          cuenta={cuentaActiva}
+          ocupado={ocupado}
+          onCancelar={() => setModal(null)}
+          onConfirmar={async ({ jugador_id, monto, motivo }) => {
+            const cid = cuentaActiva.id;
+            const r = await llamarApi('/api/descuento', 'POST', {
+              cuenta_id: cid,
+              jugador_id,
+              monto,
+              motivo,
+              cajera: turno?.cajera || null,
+            });
+            setModal(null);
+            if (r?.descuento) {
+              setEstado((prev) => {
+                if (!prev) return prev;
+                const cuentas = (prev.cuentas || []).map((c) =>
+                  c.id === cid
+                    ? { ...c, descuentos: [...((c.descuentos || []).filter((x) => x.id !== r.descuento.id)), r.descuento] }
+                    : c
+                );
+                return { ...prev, cuentas };
+              });
+            }
+          }}
+        />
+      )}
+
       {modal?.tipo === 'cobrarDeuda' && modal.cxc && turno && (
         <ModalCobrarDeuda
           cxc={modal.cxc}
@@ -622,15 +695,17 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
 }
 
 // ===== Vista: detalle de cuenta =====
-function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onCerrar, ocupado }) {
+function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onCerrar, onAbonoReserva, onDescuento, onEliminarDescuento, ocupado }) {
   const total = totalCuenta(cuenta);
   const pagado = totalPagado(cuenta);
-  const saldo = total - pagado;
+  const descuentos = totalDescuentos(cuenta);
+  const saldo = total - pagado - descuentos;
   const desglose = desglosePorJugador(cuenta);
-  // La cuenta se salda cuando lo abonado cubre el TOTAL, sin importar quién
-  // puso cuánto: una persona puede abonar de más y cubrir la parte de otro.
-  // El desglose por jugador es solo una referencia de cuánto le toca a cada uno.
-  const cuentaSaldada = total > 0 && saldado(total - pagado);
+  // La cuenta se salda cuando lo abonado + los descuentos cubren el TOTAL, sin
+  // importar quién puso cuánto: una persona puede abonar de más y cubrir la
+  // parte de otro, y un descuento reduce lo que falta por cobrar. El desglose
+  // por jugador es solo una referencia de cuánto le toca a cada uno.
+  const cuentaSaldada = total > 0 && saldado(total - pagado - descuentos);
   const cancha = CANCHAS.find((c) => c.id === cuenta.cancha_id);
   const iconoProducto = (id) => (productos.find((p) => p.id === id) || {}).icono || '•';
 
@@ -650,6 +725,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
         <div style={{ display: 'flex', gap: 14, marginTop: 12, paddingTop: 12, borderTop: '1px solid #F0F0F0', fontSize: 12 }}>
           <div><span style={{ color: '#5C7785' }}>Total: </span><strong>{fmt(total)}</strong></div>
           <div><span style={{ color: '#5C7785' }}>Pagado: </span><strong style={{ color: '#27AE60' }}>{fmt(pagado)}</strong></div>
+          {descuentos > 0 && <div><span style={{ color: '#5C7785' }}>Descuentos: </span><strong style={{ color: '#8E44AD' }}>−{fmt(descuentos)}</strong></div>}
         </div>
       </div>
 
@@ -703,7 +779,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
                 <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10 }}>
                   <div style={{ fontSize: 18 }}>{m.icon}</div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{j.nombre || '?'}</div>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>{p.es_reserva ? 'Abono de reserva' : (j.nombre || '?')}</div>
                     <div style={{ fontSize: 11, color: '#5C7785' }}>{m.label}</div>
                   </div>
                   <div style={{ fontWeight: 700, color: m.color, fontSize: 14 }}>{fmt(p.monto)}</div>
@@ -714,9 +790,35 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
         </>
       )}
 
+      {(cuenta.descuentos || []).length > 0 && (
+        <>
+          <Titulo>Descuentos</Titulo>
+          <div style={{ background: 'white', borderRadius: 14, padding: 6, marginBottom: 20, boxShadow: '0 3px 12px rgba(0,0,0,0.04)' }}>
+            {(cuenta.descuentos || []).map((dd) => {
+              const j = (cuenta.jugadores || []).find((x) => x.id === dd.jugador_id) || {};
+              return (
+                <div key={dd.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 10 }}>
+                  <div style={{ fontSize: 18 }}>🏷️</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>{dd.motivo}{j.nombre ? ` · ${j.nombre}` : ''}</div>
+                    <div style={{ fontSize: 11, color: '#5C7785' }}>Descuento{dd.cajera ? ` · ${dd.cajera}` : ''}</div>
+                  </div>
+                  <div style={{ fontWeight: 700, color: '#8E44AD', fontSize: 14 }}>−{fmt(dd.monto)}</div>
+                  <button onClick={() => onEliminarDescuento(dd.id)} disabled={ocupado} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#C0392B', padding: 4, fontSize: 16 }}>🗑</button>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
         <button onClick={onAgregar} disabled={ocupado} style={{ ...btnPri, background: '#2E84A6', color: 'white' }}>+ AGREGAR PRODUCTO</button>
         <button onClick={onCobrar} disabled={ocupado || cuentaSaldada} style={{ ...btnPri, background: !cuentaSaldada ? '#1A3D4D' : '#CCC', color: 'white' }}>$ COBRAR</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <button onClick={onAbonoReserva} disabled={ocupado} style={{ ...btnPri, background: 'white', border: `2px solid #2E84A6`, color: '#2E84A6' }}>🎟️ ABONO DE RESERVA</button>
+        <button onClick={onDescuento} disabled={ocupado} style={{ ...btnPri, background: 'white', border: `2px solid #8E44AD`, color: '#8E44AD' }}>🏷️ APLICAR DESCUENTO</button>
       </div>
       {cuentaSaldada && (
         <button onClick={onCerrar} disabled={ocupado} style={{ ...btnPri, width: '100%', background: 'linear-gradient(135deg,#27AE60,#229954)', color: 'white', fontSize: 15 }}>✓ CERRAR CUENTA Y LIBERAR CANCHA</button>
@@ -998,7 +1100,8 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
   const desglose = desglosePorJugador(cuenta);
   const total = totalCuenta(cuenta);
   const pagado = totalPagado(cuenta);
-  const pendienteCuenta = Math.max(0, Math.round(total - pagado));
+  const descuentos = totalDescuentos(cuenta);
+  const pendienteCuenta = Math.max(0, Math.round(total - pagado - descuentos));
   const [jugadorId, setJugadorId] = useState(null);
   const [metodo, setMetodo] = useState(null);
   const [monto, setMonto] = useState('');
@@ -1070,7 +1173,7 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
       <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 14 }}>El monto es libre: una persona puede poner más de su parte y se abona al total de la cuenta.</p>
       <div style={{ background: '#1A3D4D', color: 'white', borderRadius: 12, padding: 14, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ fontSize: 12 }}>
-          <div style={{ opacity: 0.8 }}>Total {fmt(total)} · Abonado {fmt(pagado)}</div>
+          <div style={{ opacity: 0.8 }}>Total {fmt(total)} · Abonado {fmt(pagado)}{descuentos > 0 ? ` · Desc. ${fmt(descuentos)}` : ''}</div>
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontSize: 10, opacity: 0.8, fontWeight: 700 }}>FALTA</div>
@@ -1121,6 +1224,96 @@ function ModalCobrarDeuda({ cxc, onCobrar, onCancelar, ocupado }) {
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onCancelar} style={btnSec}>Cancelar</button>
         <button onClick={() => metodo && onCobrar(metodo)} disabled={!metodo || ocupado} style={{ ...btnPri, flex: 2, background: metodo && !ocupado ? '#27AE60' : '#E5E5E5', color: metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : 'CONFIRMAR COBRO →'}</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Modal: abono de reserva =====
+// Abono que el cliente dejó al reservar. Es un pago adelantado que se descuenta
+// del total de la cuenta. Trae $20.000 por defecto, editable.
+function ModalAbonoReserva({ cuenta, onConfirmar, onCancelar, ocupado }) {
+  const [monto, setMonto] = useState('20000');
+  const [metodo, setMetodo] = useState('transferencia');
+  // El abono es dinero real, no se puede "fiar".
+  const metodos = METODOS.filter((m) => m.v !== 'fiado');
+  const valido = Number(monto) > 0 && metodo;
+  return (
+    <Modal onClose={onCancelar}>
+      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>🎟️ Abono de reserva</div>
+      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 16 }}>Lo que el cliente dejó al reservar. Se descuenta del total de la cuenta.</p>
+      <label style={lbl}>Monto del abono</label>
+      <div style={{ position: 'relative', margin: '6px 0 16px' }}>
+        <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
+        <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="20000" style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
+      </div>
+      <label style={lbl}>¿Cómo lo pagó?</label>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 7, margin: '6px 0 16px' }}>
+        {metodos.map((m) => (
+          <button key={m.v} onClick={() => setMetodo(m.v)} style={{ padding: 12, borderRadius: 10, border: metodo === m.v ? `2px solid ${m.color}` : '2px solid #E5E5E5', background: metodo === m.v ? m.color : 'white', color: metodo === m.v ? 'white' : '#1A3D4D', fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>{m.icon} {m.label}</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onCancelar} style={btnSec}>Cancelar</button>
+        <button onClick={() => valido && onConfirmar(Number(monto), metodo)} disabled={!valido || ocupado} style={{ ...btnPri, flex: 2, background: valido && !ocupado ? '#2E84A6' : '#E5E5E5', color: valido ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : 'REGISTRAR ABONO →'}</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Modal: aplicar descuento =====
+// Reduce lo que se cobra de la cuenta. Lleva motivo obligatorio (ej. empleado)
+// para poder revisarlo luego como admin. Puede asociarse a un jugador o no.
+function ModalDescuento({ cuenta, onConfirmar, onCancelar, ocupado }) {
+  const desglose = desglosePorJugador(cuenta);
+  const total = totalCuenta(cuenta);
+  const pendiente = Math.max(0, Math.round(total - totalPagado(cuenta) - totalDescuentos(cuenta)));
+  const [jugadorId, setJugadorId] = useState(null);
+  const [monto, setMonto] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const valido = Number(monto) > 0 && motivo.trim() !== '';
+
+  // Al elegir un jugador, sugerimos su parte como monto (editable).
+  function elegirJugador(id) {
+    const nuevo = jugadorId === id ? null : id;
+    setJugadorId(nuevo);
+    if (nuevo) {
+      const d = desglose.find((x) => x.jugadorId === nuevo);
+      if (d) setMonto(String(Math.round(d.total)));
+    }
+  }
+
+  return (
+    <Modal onClose={onCancelar}>
+      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>🏷️ Aplicar descuento</div>
+      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 16 }}>Reduce lo que falta por cobrar. No es dinero recibido. El motivo queda guardado para revisarlo después.</p>
+
+      {desglose.length > 0 && (
+        <>
+          <label style={lbl}>¿A quién? (opcional)</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, margin: '6px 0 16px' }}>
+            {desglose.map((d) => (
+              <button key={d.jugadorId} onClick={() => elegirJugador(d.jugadorId)} style={chip(jugadorId === d.jugadorId)}>{jugadorId === d.jugadorId ? '✓ ' : ''}{d.nombre}</button>
+            ))}
+          </div>
+        </>
+      )}
+
+      <label style={lbl}>Monto del descuento</label>
+      <div style={{ position: 'relative', margin: '6px 0 4px' }}>
+        <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
+        <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
+      </div>
+      {pendiente > 0 && (
+        <button onClick={() => setMonto(String(pendiente))} style={{ background: 'transparent', border: 'none', color: '#8E44AD', cursor: 'pointer', fontWeight: 700, fontSize: 11, marginBottom: 14 }}>Descontar todo lo que falta ({fmt(pendiente)})</button>
+      )}
+
+      <label style={lbl}>Motivo</label>
+      <input type="text" value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Ej: empleado, cortesía, promoción…" style={{ ...inp, margin: '6px 0 16px' }} />
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onCancelar} style={btnSec}>Cancelar</button>
+        <button onClick={() => valido && onConfirmar({ jugador_id: jugadorId, monto: Number(monto), motivo: motivo.trim() })} disabled={!valido || ocupado} style={{ ...btnPri, flex: 2, background: valido && !ocupado ? '#8E44AD' : '#E5E5E5', color: valido ? 'white' : '#999' }}>{ocupado ? 'Aplicando…' : 'APLICAR DESCUENTO →'}</button>
       </div>
     </Modal>
   );
