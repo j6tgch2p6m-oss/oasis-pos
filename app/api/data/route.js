@@ -45,6 +45,12 @@ export async function GET() {
       totalVentas: 0,
       cuentasCerradas: 0,
       productosVendidos: 0,
+      // Abonos de reserva cobrados en el turno (subconjunto de las ventas, ya
+      // van incluidos en totalVentas y en su método; se muestran aparte como
+      // referencia) y descuentos aplicados (no son dinero: solo reducen lo que
+      // se cobra, por eso NO entran en totalVentas).
+      reservas: 0,
+      descuentos: 0,
       // Cobro de deudas (cartera) hechas DURANTE este turno. Son ingresos del
       // día, pero corresponden a ventas fiadas de días anteriores: se muestran
       // aparte en el cierre y NO se cuentan como venta del día.
@@ -90,18 +96,21 @@ export async function GET() {
       // turno (para el resumen). Los hijos de cada cuenta abierta se derivan
       // filtrando estos mismos resultados, porque cuentaIds ⊆ idsTurno.
       const vacio = Promise.resolve({ data: [], error: null });
-      const [jRes, pagosTRes, consumosTRes] = await Promise.all([
+      const [jRes, pagosTRes, consumosTRes, descuentosTRes] = await Promise.all([
         cuentaIds.length ? supabase.from('jugadores').select('*').in('cuenta_id', cuentaIds) : vacio,
         idsTurno.length ? supabase.from('pagos').select('*').in('cuenta_id', idsTurno) : vacio,
         idsTurno.length ? supabase.from('consumos').select('*').in('cuenta_id', idsTurno) : vacio,
+        idsTurno.length ? supabase.from('descuentos').select('*').in('cuenta_id', idsTurno) : vacio,
       ]);
       if (jRes.error) throw jRes.error;
       if (pagosTRes.error) throw pagosTRes.error;
       if (consumosTRes.error) throw consumosTRes.error;
+      if (descuentosTRes.error) throw descuentosTRes.error;
 
       const jugadores = jRes.data || [];
       const pagosTurno = pagosTRes.data || [];
       const consumosTurno = consumosTRes.data || [];
+      const descuentosTurno = descuentosTRes.data || [];
 
       cuentas = cuentasBase.map((c) => ({
         ...c,
@@ -110,13 +119,16 @@ export async function GET() {
           .sort((a, b) => (a.orden || 0) - (b.orden || 0)),
         consumos: consumosTurno.filter((co) => co.cuenta_id === c.id),
         pagos: pagosTurno.filter((p) => p.cuenta_id === c.id),
+        descuentos: descuentosTurno.filter((dd) => dd.cuenta_id === c.id),
       }));
 
       pagosTurno.forEach((p) => {
         const monto = Number(p.monto) || 0;
         if (resumenTurno[p.metodo] !== undefined) resumenTurno[p.metodo] += monto;
         resumenTurno.totalVentas += monto;
+        if (p.es_reserva) resumenTurno.reservas += monto;
       });
+      resumenTurno.descuentos = descuentosTurno.reduce((s, dd) => s + (Number(dd.monto) || 0), 0);
       resumenTurno.productosVendidos = consumosTurno.reduce(
         (s, c) => s + (Number(c.cantidad) || 0),
         0

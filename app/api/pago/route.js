@@ -33,6 +33,7 @@ export async function POST(request) {
           monto: body.monto,
           metodo: body.metodo,
           pagado_por: body.pagado_por,
+          es_reserva: body.es_reserva,
         }];
 
     // Validación: evita 500 por violar restricciones de la BD y datos basura.
@@ -53,6 +54,8 @@ export async function POST(request) {
         // pagado_por: nombre de quien puso el dinero cuando cubre a otro
         // jugador. Vacío cuando cada quien paga lo suyo.
         pagado_por: e.pagado_por ? String(e.pagado_por).trim() : null,
+        // es_reserva: marca el abono que el cliente dejó al reservar.
+        es_reserva: !!e.es_reserva,
         // Guardamos el nombre para poder crear la deuda de cartera si es fiado.
         _jugador_nombre: e.jugador_nombre || 'Sin nombre',
       });
