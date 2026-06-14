@@ -405,38 +405,44 @@ export default function POSApp() {
         <ModalCobrar
           cuenta={cuentaActiva}
           ocupado={ocupado}
-          onPagar={async (payload) => {
+          onPagar={async (pagos) => {
             const cid = cuentaActiva.id;
-            const r = await llamarApi('/api/pago', 'POST', { cuenta_id: cid, ...payload });
-            if (r?.pago) {
-              // Reflejar el pago en su cuenta de inmediato (dedupe por id) para
-              // que el jugador quede saldado y se habilite "cerrar cuenta",
+            const r = await llamarApi('/api/pago', 'POST', { cuenta_id: cid, pagos });
+            if (r?.pagos) {
+              // Reflejar los pagos en su cuenta de inmediato (dedupe por id) para
+              // que los jugadores queden saldados y se habilite "cerrar cuenta",
               // sin depender de la recarga de /api/data.
               setEstado((prev) => {
                 if (!prev) return prev;
+                const idsNuevos = new Set(r.pagos.map((p) => p.id));
                 const cuentas = (prev.cuentas || []).map((c) =>
                   c.id === cid
-                    ? { ...c, pagos: [...((c.pagos || []).filter((x) => x.id !== r.pago.id)), r.pago] }
+                    ? { ...c, pagos: [...((c.pagos || []).filter((x) => !idsNuevos.has(x.id))), ...r.pagos] }
                     : c
                 );
-                // Si fue "fiado", reflejar también en "Por cobrar". El id real
+                // Cada pago "fiado" se refleja también en "Por cobrar". El id real
                 // de la fila no lo devuelve el server; usamos una clave temporal
-                // que la próxima recarga real reemplaza por completo.
+                // que la próxima recarga real reemplaza por completo. El nombre del
+                // jugador lo tomamos del payload (el server solo devuelve el id).
                 let cuentasPorCobrar = prev.cuentasPorCobrar || [];
-                if (payload.metodo === 'fiado') {
-                  const key = 'tmp-' + r.pago.id;
-                  cuentasPorCobrar = [
-                    ...cuentasPorCobrar.filter((x) => x.id !== key),
-                    {
-                      id: key,
+                const fiados = r.pagos.filter((p) => p.metodo === 'fiado');
+                if (fiados.length) {
+                  const nuevas = fiados.map((p) => {
+                    const e = pagos.find((x) => x.jugador_id === p.jugador_id) || {};
+                    return {
+                      id: 'tmp-' + p.id,
                       cuenta_id: cid,
-                      jugador_id: payload.jugador_id,
-                      jugador_nombre: payload.jugador_nombre || 'Sin nombre',
-                      monto: payload.monto,
-                      saldo_pendiente: payload.monto,
+                      jugador_id: p.jugador_id,
+                      jugador_nombre: e.jugador_nombre || 'Sin nombre',
+                      monto: p.monto,
+                      saldo_pendiente: p.monto,
                       cobrado: false,
                       created_at: new Date().toISOString(),
-                    },
+                    };
+                  });
+                  cuentasPorCobrar = [
+                    ...cuentasPorCobrar.filter((x) => !nuevas.some((n) => n.id === x.id)),
+                    ...nuevas,
                   ];
                 }
                 return { ...prev, cuentas, cuentasPorCobrar };
@@ -700,7 +706,9 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
                   <div style={{ fontSize: 18 }}>{m.icon}</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, fontSize: 13 }}>{j.nombre || '?'}</div>
-                    <div style={{ fontSize: 11, color: '#5C7785' }}>{m.label}</div>
+                    <div style={{ fontSize: 11, color: '#5C7785' }}>
+                      {m.label}{p.pagado_por ? ` · pagó ${p.pagado_por}` : ''}
+                    </div>
                   </div>
                   <div style={{ fontWeight: 700, color: m.color, fontSize: 14 }}>{fmt(p.monto)}</div>
                 </div>
@@ -991,16 +999,49 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
   const [jugadorId, setJugadorId] = useState(null);
   const [metodo, setMetodo] = useState(null);
   const [monto, setMonto] = useState('');
+  // Pagos ampliados: ids de OTROS jugadores que esta persona también paga.
+  const [cubiertos, setCubiertos] = useState([]);
 
   const d = desglose.find((x) => x.jugadorId === jugadorId);
   const yaPagado = jugadorId ? pagadoPorJugador(cuenta, jugadorId) : 0;
   const pendiente = d ? Math.round(d.total - yaPagado) : 0;
 
+  // Otros jugadores que aún deben algo (candidatos a que alguien los cubra).
+  const otrosPendientes = desglose
+    .filter((x) => x.jugadorId !== jugadorId)
+    .map((x) => ({ ...x, pend: Math.round(x.total - pagadoPorJugador(cuenta, x.jugadorId)) }))
+    .filter((x) => x.total > 0 && !saldado(x.pend));
+  const totalCubiertos = otrosPendientes
+    .filter((x) => cubiertos.includes(x.jugadorId))
+    .reduce((s, x) => s + x.pend, 0);
+  const totalACobrar = (Number(monto) || 0) + totalCubiertos;
+
+  function elegir(id) {
+    setJugadorId(id);
+    setMetodo(null);
+    setMonto('');
+    setCubiertos([]);
+  }
+
   async function confirmar() {
     if (!jugadorId || !metodo || !monto || Number(monto) <= 0) return;
-    const jugador = (cuenta.jugadores || []).find((j) => j.id === jugadorId) || {};
-    await onPagar({ jugador_id: jugadorId, jugador_nombre: jugador.nombre, monto: Number(monto), metodo });
-    setJugadorId(null); setMetodo(null); setMonto('');
+    const nombreDe = (id) => ((cuenta.jugadores || []).find((j) => j.id === id) || {}).nombre;
+    const pagador = nombreDe(jugadorId);
+    // Pago propio del jugador + un pago por cada jugador que esté cubriendo.
+    const pagos = [{ jugador_id: jugadorId, jugador_nombre: pagador, monto: Number(monto), metodo }];
+    otrosPendientes
+      .filter((x) => cubiertos.includes(x.jugadorId))
+      .forEach((x) => {
+        pagos.push({
+          jugador_id: x.jugadorId,
+          jugador_nombre: x.nombre,
+          monto: x.pend,
+          metodo,
+          pagado_por: pagador,
+        });
+      });
+    await onPagar(pagos);
+    setJugadorId(null); setMetodo(null); setMonto(''); setCubiertos([]);
   }
 
   if (jugadorId && d) {
@@ -1020,13 +1061,43 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
           <input type="number" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder={String(Math.round(pendiente))} style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
         </div>
         <button onClick={() => setMonto(String(Math.round(pendiente)))} style={{ background: 'transparent', border: 'none', color: '#2E84A6', cursor: 'pointer', fontWeight: 700, fontSize: 11, marginBottom: 14 }}>Cobrar total pendiente ({fmt(pendiente)})</button>
+
+        {otrosPendientes.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <label style={lbl}>¿Esta persona también paga por…?</label>
+            <p style={{ fontSize: 11, color: '#8A7B5F', margin: '4px 0 8px' }}>Marca a quién más le paga {d.nombre}. Se cobran con el mismo método y esos jugadores quedan saldados.</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {otrosPendientes.map((o) => {
+                const on = cubiertos.includes(o.jugadorId);
+                return (
+                  <button
+                    key={o.jugadorId}
+                    onClick={() => setCubiertos(on ? cubiertos.filter((x) => x !== o.jugadorId) : [...cubiertos, o.jugadorId])}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderRadius: 10, border: on ? '2px solid #2E84A6' : '2px solid #E5E5E5', background: on ? '#E8F4F8' : 'white', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+                  >
+                    <span style={{ fontWeight: 700, fontSize: 13, color: '#1A3D4D' }}>{on ? '✓ ' : ''}{o.nombre}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#C0392B' }}>{fmt(o.pend)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {totalCubiertos > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#1A3D4D', color: 'white', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
+            <span style={{ fontSize: 12, fontWeight: 700 }}>Total a cobrar ({d.nombre} + {cubiertos.length} más)</span>
+            <span className="display" style={{ fontSize: 18, fontWeight: 800 }}>{fmt(totalACobrar)}</span>
+          </div>
+        )}
+
         <label style={lbl}>Método de pago</label>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 7, margin: '6px 0 16px' }}>
           {METODOS.map((m) => (
             <button key={m.v} onClick={() => setMetodo(m.v)} style={{ padding: 12, borderRadius: 10, border: metodo === m.v ? `2px solid ${m.color}` : '2px solid #E5E5E5', background: metodo === m.v ? m.color : 'white', color: metodo === m.v ? 'white' : '#1A3D4D', fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>{m.icon} {m.label}</button>
           ))}
         </div>
-        <button onClick={confirmar} disabled={!monto || !metodo || Number(monto) <= 0 || ocupado} style={{ ...btnPri, width: '100%', background: monto && metodo && Number(monto) > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: monto && metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : 'CONFIRMAR PAGO →'}</button>
+        <button onClick={confirmar} disabled={!monto || !metodo || Number(monto) <= 0 || ocupado} style={{ ...btnPri, width: '100%', background: monto && metodo && Number(monto) > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: monto && metodo ? 'white' : '#999' }}>{ocupado ? 'Registrando…' : totalCubiertos > 0 ? `CONFIRMAR PAGO (${fmt(totalACobrar)}) →` : 'CONFIRMAR PAGO →'}</button>
       </Modal>
     );
   }
@@ -1041,7 +1112,7 @@ function ModalCobrar({ cuenta, onPagar, onCerrar, ocupado }) {
           const pend = d.total - pj;
           const completo = saldado(pend) && d.total > 0;
           return (
-            <button key={d.jugadorId} onClick={() => !completo && d.total > 0 && setJugadorId(d.jugadorId)} disabled={completo || d.total === 0} style={{ padding: 14, borderRadius: 12, border: completo ? '2px solid #27AE60' : '2px solid #E5E5E5', background: completo ? '#E8F5E9' : 'white', cursor: completo || d.total === 0 ? 'default' : 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: 'inherit' }}>
+            <button key={d.jugadorId} onClick={() => !completo && d.total > 0 && elegir(d.jugadorId)} disabled={completo || d.total === 0} style={{ padding: 14, borderRadius: 12, border: completo ? '2px solid #27AE60' : '2px solid #E5E5E5', background: completo ? '#E8F5E9' : 'white', cursor: completo || d.total === 0 ? 'default' : 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: 'inherit' }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 14 }}>{d.nombre}</div>
                 <div style={{ fontSize: 11, color: '#5C7785', marginTop: 2 }}>{completo ? '✓ Pagado completo' : `Pendiente: ${fmt(pend)} de ${fmt(d.total)}`}</div>
