@@ -85,7 +85,8 @@ export async function GET() {
     //  - consumos del mes (top productos del mes)
     //  - último turno cerrado (alerta de descuadre de caja)
     //  - jugadores (nombres para canchas en vivo y top clientes)
-    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes, ultCierreRes, jugadoresRes] =
+    //  - descuentos del mes (reflejo en admin)
+    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes, ultCierreRes, jugadoresRes, descuentosRes] =
       await Promise.all([
         supabase
           .from('turnos')
@@ -104,6 +105,11 @@ export async function GET() {
           .order('fecha_cierre', { ascending: false })
           .limit(1),
         supabase.from('jugadores').select('*'),
+        supabase
+          .from('descuentos')
+          .select('*')
+          .gte('created_at', inicioMes.toISOString())
+          .order('created_at', { ascending: false }),
       ]);
     if (turnoRes.error) throw turnoRes.error;
     if (pagosRes.error) throw pagosRes.error;
@@ -112,6 +118,7 @@ export async function GET() {
     if (consumosRes.error) throw consumosRes.error;
     if (ultCierreRes.error) throw ultCierreRes.error;
     if (jugadoresRes.error) throw jugadoresRes.error;
+    if (descuentosRes.error) throw descuentosRes.error;
 
     const turno = turnoRes.data && turnoRes.data.length ? turnoRes.data[0] : null;
     const pagos = pagosRes.data || [];
@@ -120,6 +127,7 @@ export async function GET() {
     const consumosMes = consumosRes.data || [];
     const ultCierre = ultCierreRes.data && ultCierreRes.data.length ? ultCierreRes.data[0] : null;
     const jugadores = jugadoresRes.data || [];
+    const descuentosMesData = descuentosRes.data || [];
 
     // Ola 2: cobros de cartera hechos DURANTE el último turno cerrado
     // (entran a la caja en efectivo y cuentan para el descuadre).
@@ -343,6 +351,26 @@ export async function GET() {
         ocupacionHora[h].cuentas += 1;
       });
 
+    // ---- ABONOS DE RESERVA DEL MES ----
+    const reservasMesPagos = pagosMes.filter((p) => p.es_reserva);
+    const reservasMes = {
+      total: sumar(reservasMesPagos, (p) => p.monto),
+      cantidad: reservasMesPagos.length,
+    };
+
+    // ---- DESCUENTOS DEL MES ----
+    const descuentosMes = {
+      total: sumar(descuentosMesData, (d) => d.monto),
+      cantidad: descuentosMesData.length,
+      lista: descuentosMesData.slice(0, 10).map((d) => ({
+        motivo: d.motivo,
+        monto: Number(d.monto) || 0,
+        nombre: d.jugador_id ? nombrePorId[d.jugador_id] || null : null,
+        cajera: d.cajera || null,
+        fecha: d.created_at,
+      })),
+    };
+
     return NextResponse.json(
       {
         generadoEn: ahora.toISOString(),
@@ -394,6 +422,8 @@ export async function GET() {
         },
         proyeccionMes,
         ocupacionHora,
+        reservasMes,
+        descuentosMes,
       },
       noStore
     );

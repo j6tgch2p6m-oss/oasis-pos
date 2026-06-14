@@ -127,6 +127,8 @@ create table if not exists pagos (
   -- Pagos ampliados: nombre de quien puso el dinero cuando cubre la parte de
   -- otro jugador. Vacío cuando cada quien paga lo suyo.
   pagado_por text,
+  -- Marca el abono que el cliente dejó al reservar (pago adelantado).
+  es_reserva boolean not null default false,
   created_at timestamptz not null default now()
 );
 alter table pagos add column if not exists cuenta_id  uuid;
@@ -134,6 +136,7 @@ alter table pagos add column if not exists jugador_id uuid;
 alter table pagos add column if not exists monto      numeric;
 alter table pagos add column if not exists metodo     text;
 alter table pagos add column if not exists pagado_por text;
+alter table pagos add column if not exists es_reserva boolean not null default false;
 alter table pagos add column if not exists created_at timestamptz not null default now();
 -- Constraint idempotente
 do $$ begin
@@ -187,6 +190,25 @@ do $$ begin
 exception when duplicate_object then null;
 end $$;
 
+-- ---------- DESCUENTOS ----------
+-- Reduce lo que se cobra de una cuenta (no es dinero recibido). Lleva motivo
+-- obligatorio para revisarlo luego como admin. jugador_id es opcional.
+create table if not exists descuentos (
+  id          uuid primary key default uuid_generate_v4(),
+  cuenta_id   uuid references cuentas(id) on delete cascade,
+  jugador_id  uuid references jugadores(id) on delete set null,
+  monto       numeric not null,
+  motivo      text not null,
+  cajera      text,
+  created_at  timestamptz not null default now()
+);
+alter table descuentos add column if not exists cuenta_id  uuid;
+alter table descuentos add column if not exists jugador_id uuid;
+alter table descuentos add column if not exists monto      numeric;
+alter table descuentos add column if not exists motivo     text;
+alter table descuentos add column if not exists cajera     text;
+alter table descuentos add column if not exists created_at timestamptz not null default now();
+
 -- ============================================================================
 -- ÍNDICES (reflejan exactamente los de producción)
 -- ============================================================================
@@ -229,6 +251,10 @@ create index if not exists idx_cxc_turno_cobro
   on cuentas_por_cobrar(turno_cobro_id)
   where cobrado = true;
 
+-- DESCUENTOS
+create index if not exists idx_descuentos_cuenta  on descuentos(cuenta_id);
+create index if not exists idx_descuentos_created on descuentos(created_at desc);
+
 -- Garantía: máximo UN turno abierto a la vez (la BD rechaza un 2º turno abierto)
 create unique index if not exists uniq_turno_abierto
   on turnos ((fecha_cierre is null))
@@ -247,6 +273,7 @@ alter table jugadores          enable row level security;
 alter table consumos           enable row level security;
 alter table pagos              enable row level security;
 alter table cuentas_por_cobrar enable row level security;
+alter table descuentos         enable row level security;
 
 -- ============================================================================
 -- SEED de productos (OPCIONAL): solo se ejecuta si la tabla está vacía.
