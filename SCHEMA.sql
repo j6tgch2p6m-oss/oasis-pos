@@ -124,12 +124,16 @@ create table if not exists pagos (
   jugador_id uuid references jugadores(id) on delete cascade,
   monto      numeric not null,
   metodo     text not null check (metodo = any(array['efectivo','transferencia','tarjeta','fiado'])),
+  -- Pagos ampliados: nombre de quien puso el dinero cuando cubre la parte de
+  -- otro jugador. Vacío cuando cada quien paga lo suyo.
+  pagado_por text,
   created_at timestamptz not null default now()
 );
 alter table pagos add column if not exists cuenta_id  uuid;
 alter table pagos add column if not exists jugador_id uuid;
 alter table pagos add column if not exists monto      numeric;
 alter table pagos add column if not exists metodo     text;
+alter table pagos add column if not exists pagado_por text;
 alter table pagos add column if not exists created_at timestamptz not null default now();
 -- Constraint idempotente
 do $$ begin
@@ -243,79 +247,6 @@ alter table jugadores          enable row level security;
 alter table consumos           enable row level security;
 alter table pagos              enable row level security;
 alter table cuentas_por_cobrar enable row level security;
-
--- ============================================================================
--- FUNCIONES TRANSACCIONALES (RPC)
--- Garantizan atomicidad (todo-o-nada) en operaciones que antes hacían 2 INSERT
--- por separado y, ante un fallo parcial, dejaban datos inconsistentes:
---   * crear_cuenta_con_jugadores: cuenta + sus jugadores.
---   * crear_pago:                 pago + (si es fiado) su deuda en cartera.
--- Sin SECURITY DEFINER: corren con privilegios del llamador (service_role, que
--- ya ignora RLS). Cada rpc() de PostgREST es su propia transacción.
--- Idempotente (create or replace).
--- ============================================================================
-
-create or replace function public.crear_cuenta_con_jugadores(
-  p_turno_id uuid,
-  p_tipo text,
-  p_cancha_id text,
-  p_jugadores text[]
-) returns jsonb
-language plpgsql
-as $$
-declare
-  v_cuenta public.cuentas;
-  v_jugadores jsonb;
-begin
-  insert into public.cuentas (turno_id, tipo, cancha_id)
-  values (p_turno_id, p_tipo, p_cancha_id)
-  returning * into v_cuenta;
-
-  insert into public.jugadores (cuenta_id, nombre, orden)
-  select v_cuenta.id, j.nombre, (j.ord - 1)::int
-  from unnest(p_jugadores) with ordinality as j(nombre, ord);
-
-  select coalesce(jsonb_agg(to_jsonb(jj) order by jj.orden), '[]'::jsonb)
-  into v_jugadores
-  from public.jugadores jj
-  where jj.cuenta_id = v_cuenta.id;
-
-  return jsonb_build_object(
-    'cuenta', to_jsonb(v_cuenta),
-    'jugadores', v_jugadores
-  );
-end;
-$$;
-
-create or replace function public.crear_pago(
-  p_cuenta_id uuid,
-  p_jugador_id uuid,
-  p_jugador_nombre text,
-  p_monto numeric,
-  p_metodo text
-) returns jsonb
-language plpgsql
-as $$
-declare
-  v_pago public.pagos;
-begin
-  insert into public.pagos (cuenta_id, jugador_id, monto, metodo)
-  values (p_cuenta_id, p_jugador_id, p_monto, p_metodo)
-  returning * into v_pago;
-
-  if p_metodo = 'fiado' then
-    insert into public.cuentas_por_cobrar
-      (cuenta_id, jugador_id, jugador_nombre, monto, saldo_pendiente)
-    values
-      (p_cuenta_id, p_jugador_id, coalesce(p_jugador_nombre, 'Sin nombre'), p_monto, p_monto);
-  end if;
-
-  return to_jsonb(v_pago);
-end;
-$$;
-
--- Recarga el cache de PostgREST para exponer/actualizar las funciones de arriba.
-notify pgrst, 'reload schema';
 
 -- ============================================================================
 -- SEED de productos (OPCIONAL): solo se ejecuta si la tabla está vacía.
