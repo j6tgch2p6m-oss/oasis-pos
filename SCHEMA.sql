@@ -260,6 +260,88 @@ create unique index if not exists uniq_turno_abierto
   on turnos ((fecha_cierre is null))
   where fecha_cierre is null;
 
+-- ---------- RESERVAS (calendario de canchas) ----------
+-- Reserva de una cancha hecha por un empleado desde /reservas. Los jugadores
+-- adicionales son opcionales. tipo_pago registra si el cliente dejó abono
+-- (pago adelantado) o si la reserva tiene descuento, con su valor.
+-- Las canceladas se conservan (estado='cancelada') para análisis.
+create table if not exists reservas (
+  id              uuid primary key default uuid_generate_v4(),
+  cancha_id       text not null default 'C1',
+  nombre          text not null,
+  jugador2        text,
+  jugador3        text,
+  jugador4        text,
+  fecha           date not null,
+  hora_inicio     time not null,
+  duracion_min    int not null default 90,
+  tipo_pago       text not null default 'ninguno',
+  valor           numeric,
+  notas           text,
+  estado          text not null default 'activa',
+  creada_por      text not null,
+  actualizada_por text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+alter table reservas add column if not exists cancha_id       text not null default 'C1';
+alter table reservas add column if not exists nombre          text;
+alter table reservas add column if not exists jugador2        text;
+alter table reservas add column if not exists jugador3        text;
+alter table reservas add column if not exists jugador4        text;
+alter table reservas add column if not exists fecha           date;
+alter table reservas add column if not exists hora_inicio     time;
+alter table reservas add column if not exists duracion_min    int not null default 90;
+alter table reservas add column if not exists tipo_pago       text not null default 'ninguno';
+alter table reservas add column if not exists valor           numeric;
+alter table reservas add column if not exists notas           text;
+alter table reservas add column if not exists estado          text not null default 'activa';
+alter table reservas add column if not exists creada_por      text;
+alter table reservas add column if not exists actualizada_por text;
+alter table reservas add column if not exists created_at      timestamptz not null default now();
+alter table reservas add column if not exists updated_at      timestamptz not null default now();
+
+-- Constraints idempotentes
+do $$ begin
+  alter table reservas add constraint reservas_duracion_check
+    check (duracion_min = any(array[60, 90, 120]));
+exception when duplicate_object then null;
+end $$;
+do $$ begin
+  alter table reservas add constraint reservas_tipo_pago_check
+    check (tipo_pago = any(array['ninguno','abono','descuento']));
+exception when duplicate_object then null;
+end $$;
+do $$ begin
+  alter table reservas add constraint reservas_estado_check
+    check (estado = any(array['activa','cancelada']));
+exception when duplicate_object then null;
+end $$;
+
+-- Garantía a nivel de BD: dos reservas ACTIVAS de la misma cancha no pueden
+-- cruzarse en el tiempo. La API también lo valida (mensaje amable); esto cubre
+-- la carrera de dos requests simultáneos.
+create extension if not exists btree_gist;
+do $$ begin
+  alter table reservas add constraint reservas_sin_cruce
+    exclude using gist (
+      cancha_id with =,
+      tsrange(
+        (fecha + hora_inicio),
+        (fecha + hora_inicio + make_interval(mins => duracion_min))
+      ) with &&
+    ) where (estado = 'activa');
+exception when duplicate_object then null;
+end $$;
+
+-- Índices para el calendario y los análisis (ocupación, horas valle, clientes
+-- frecuentes)
+create index if not exists idx_reservas_fecha        on reservas(fecha);
+create index if not exists idx_reservas_cancha_fecha on reservas(cancha_id, fecha);
+create index if not exists idx_reservas_nombre       on reservas(nombre);
+create index if not exists idx_reservas_estado       on reservas(estado);
+create index if not exists idx_reservas_created      on reservas(created_at desc);
+
 -- ============================================================================
 -- ROW LEVEL SECURITY
 -- La app accede SOLO desde el servidor con la service_role key, que IGNORA RLS.
@@ -274,6 +356,7 @@ alter table consumos           enable row level security;
 alter table pagos              enable row level security;
 alter table cuentas_por_cobrar enable row level security;
 alter table descuentos         enable row level security;
+alter table reservas           enable row level security;
 
 -- ============================================================================
 -- SEED de productos (OPCIONAL): solo se ejecuta si la tabla está vacía.
@@ -290,6 +373,6 @@ select * from (values
   ('Gaseosa',               5000, 'Bebidas',          '🥤', true),
   ('Cerveza',               8000, 'Cervezas',         '🍺', true),
   ('Papas',                 4000, 'Snacks',           '🍟', true),
-  ('Maní',                  3000, 'Snacks',           '🥜', true)
+  ('Maní',                 3000, 'Snacks',           '🥜', true)
 ) as nuevos(nombre, precio, categoria, icono, activo)
 where not exists (select 1 from productos);
