@@ -9,7 +9,11 @@ Construido con Next.js + Supabase, desplegado en Vercel.
 - `SUPABASE_URL` — la URL del proyecto Supabase
 - `SUPABASE_SERVICE_ROLE_KEY` — la service_role key (secreta, solo servidor)
 
-## Etapa actual
+## Módulos
 
-Etapa 1: catálogo en vivo. La página principal lista los productos
-leídos directamente desde la base de datos Supabase.
+- `/` — POS (punto de venta) para las cajeras.
+- `/admin` — panel administrativo (protegido con `ADMIN_PASSWORD`).
+- `/reservas` — calendario de reservas de canchas para empleados.
+  Login por nombre de usuario (la lista vive en `lib/reservasAuth.js`:
+  admin, Pampa, Juanes, Laura). Requiere la tabla `reservas`
+  (incluida en `SCHEMA.sql`).
