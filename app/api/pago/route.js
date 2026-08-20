@@ -85,3 +85,80 @@ export async function POST(request) {
     return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
   }
 }
+
+// Eliminar un pago registrado por error (ej.: se digitó un cero de más).
+//
+// POR QUÉ EXISTE: antes solo se podían borrar consumos y descuentos, no pagos.
+// Cuando una cajera se equivocaba al digitar el monto, su única salida era
+// inventar un "descuento" por la diferencia para que la cuenta quedara saldada.
+// Eso descuadraba la caja: el pago inflado seguía sumando en `resumenTurno`, así
+// que el cierre exigía más efectivo del que físicamente había (pasó el
+// 2026-06-20: pago de $910.000 en vez de $91.000, "corregido" con un descuento
+// de $819.000). Con este endpoint se borra el pago malo y se vuelve a registrar
+// bien, sin tocar los descuentos.
+export async function DELETE(request) {
+  try {
+    const { pagoId } = await request.json();
+    if (!pagoId) {
+      return NextResponse.json({ error: 'Falta el pago a eliminar' }, { status: 400, ...noStore });
+    }
+
+    // Necesitamos el pago completo: si era "fiado" hay que borrar también la
+    // deuda de cartera que generó, o quedaría cobrándose una deuda fantasma.
+    const { data: pago, error: errLeer } = await supabase
+      .from('pagos')
+      .select('*')
+      .eq('id', pagoId)
+      .maybeSingle();
+    if (errLeer) throw errLeer;
+
+    // Ya no existe (doble clic o reintento por timeout): no es error.
+    if (!pago) {
+      return NextResponse.json({ ok: true, yaEliminado: true }, noStore);
+    }
+
+    if (pago.metodo === 'fiado') {
+      // No hay columna que enlace pago -> deuda, así que emparejamos por cuenta,
+      // jugador y monto. Filtramos en JS (no en la query) porque `monto` es
+      // numeric y vuelve como texto "36250.00": comparar en el servidor por
+      // igualdad es frágil.
+      const { data: deudas, error: errDeudas } = await supabase
+        .from('cuentas_por_cobrar')
+        .select('*')
+        .eq('cuenta_id', pago.cuenta_id);
+      if (errDeudas) throw errDeudas;
+
+      const mismoMonto = (Number(pago.monto) || 0);
+      const candidatas = (deudas || []).filter(
+        (d) =>
+          (d.jugador_id ?? null) === (pago.jugador_id ?? null) &&
+          (Number(d.monto) || 0) === mismoMonto
+      );
+
+      // Si la deuda YA se cobró, ese dinero sí entró a la caja de algún turno.
+      // Borrar el pago aquí dejaría el cobro huérfano y descuadraría ese cierre.
+      if (candidatas.some((d) => d.cobrado)) {
+        return NextResponse.json(
+          { error: 'No puedes eliminar este fiado: la deuda ya fue cobrada. Registra el ajuste como un pago nuevo en lugar de borrar este.' },
+          { status: 409, ...noStore }
+        );
+      }
+
+      const pendiente = candidatas.find((d) => !d.cobrado);
+      if (pendiente) {
+        const { error: errBorrarDeuda } = await supabase
+          .from('cuentas_por_cobrar')
+          .delete()
+          .eq('id', pendiente.id);
+        if (errBorrarDeuda) throw errBorrarDeuda;
+      }
+    }
+
+    const { error } = await supabase.from('pagos').delete().eq('id', pagoId);
+    if (error) throw error;
+
+    return NextResponse.json({ ok: true }, noStore);
+  } catch (e) {
+    return NextResponse.json({ error: e.message }, { status: 500, ...noStore });
+  }
+}

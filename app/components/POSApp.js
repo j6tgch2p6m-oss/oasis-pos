@@ -267,6 +267,32 @@ export default function POSApp() {
                 }));
               }
             }}
+            onEliminarPago={async (pagoId) => {
+              const cid = cuentaActiva.id;
+              const pago = (cuentaActiva.pagos || []).find((p) => p.id === pagoId);
+              // Borrar dinero ya registrado no se deshace: pedimos confirmación
+              // mostrando el monto, para que no se vaya el pago equivocado.
+              const ok = typeof window !== 'undefined'
+                ? window.confirm(`¿Eliminar el pago de ${fmt(pago?.monto)}${pago?.metodo ? ` (${pago.metodo})` : ''}?\n\nÚsalo solo si se digitó mal. Después vuelve a registrarlo con el monto correcto.`)
+                : true;
+              if (!ok) return;
+              const r = await llamarApi('/api/pago', 'DELETE', { pagoId });
+              if (r?.ok) {
+                setEstado((prev) => {
+                  if (!prev) return prev;
+                  const cuentas = (prev.cuentas || []).map((c) =>
+                    c.id === cid ? { ...c, pagos: (c.pagos || []).filter((x) => x.id !== pagoId) } : c
+                  );
+                  // Si era fiado, su deuda de cartera desapareció con él.
+                  const cuentasPorCobrar = pago?.metodo === 'fiado'
+                    ? (prev.cuentasPorCobrar || []).filter(
+                        (d) => !(d.cuenta_id === cid && (Number(d.monto) || 0) === (Number(pago.monto) || 0) && !d.cobrado)
+                      )
+                    : prev.cuentasPorCobrar;
+                  return { ...prev, cuentas, cuentasPorCobrar };
+                });
+              }
+            }}
             onEliminarConsumo={async (consumoId) => {
               const r = await llamarApi('/api/consumo', 'DELETE', { consumoId });
               if (r?.ok) {
@@ -309,6 +335,16 @@ export default function POSApp() {
           <VistaCierre
             estado={estado}
             ocupado={ocupado}
+            onVerCuenta={(id) => { setCuentaActivaId(id); setVista('cuenta'); }}
+            onCancelarVacia={async (cuentaId) => {
+              const r = await llamarApi('/api/cuenta', 'PATCH', { cuentaId });
+              if (r?.ok) {
+                setEstado((prev) => ({
+                  ...(prev || {}),
+                  cuentas: ((prev && prev.cuentas) || []).filter((c) => c.id !== cuentaId),
+                }));
+              }
+            }}
             onConfirmar={async () => {
               const r = await llamarApi('/api/turno', 'PATCH', { turnoId: turno.id });
               if (r?.ok) {
@@ -695,7 +731,7 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
 }
 
 // ===== Vista: detalle de cuenta =====
-function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onCerrar, onAbonoReserva, onDescuento, onEliminarDescuento, ocupado }) {
+function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onEliminarPago, onCerrar, onAbonoReserva, onDescuento, onEliminarDescuento, ocupado }) {
   const total = totalCuenta(cuenta);
   const pagado = totalPagado(cuenta);
   const descuentos = totalDescuentos(cuenta);
@@ -728,6 +764,18 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
           {descuentos > 0 && <div><span style={{ color: '#5C7785' }}>Descuentos: </span><strong style={{ color: '#8E44AD' }}>−{fmt(descuentos)}</strong></div>}
         </div>
       </div>
+
+      {/* Un saldo NEGATIVO significa que lo pagado + lo descontado supera el
+          total: o se digitó un pago de más, o se aplicó un descuento de más.
+          Antes esto pasaba en silencio (saldado() solo mira `pendiente < 1`, y
+          un saldo muy negativo también lo cumple), así que la cuenta se cerraba
+          como normal y el descuadre solo aparecía al contar la caja. */}
+      {saldo < -1 && (
+        <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 12, padding: 14, marginBottom: 16, color: '#791F1F', fontSize: 13, lineHeight: 1.5 }}>
+          ⚠ <strong>Esta cuenta está descuadrada por {fmt(Math.abs(saldo))}.</strong> Lo registrado (pagos {fmt(pagado)}{descuentos > 0 ? ` + descuentos ${fmt(descuentos)}` : ''}) supera el total de {fmt(total)}.
+          <div style={{ marginTop: 6 }}>Revisa la lista de pagos: si alguno tiene un cero de más, bórralo con el 🗑 y regístralo bien. No lo tapes con un descuento.</div>
+        </div>
+      )}
 
       <Titulo>Cuenta por jugador</Titulo>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 10, marginBottom: 20 }}>
@@ -783,6 +831,7 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
                     <div style={{ fontSize: 11, color: '#5C7785' }}>{m.label}</div>
                   </div>
                   <div style={{ fontWeight: 700, color: m.color, fontSize: 14 }}>{fmt(p.monto)}</div>
+                  <button onClick={() => onEliminarPago(p.id)} disabled={ocupado} title="Eliminar este pago (si se digitó mal)" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#C0392B', padding: 4, fontSize: 16 }}>🗑</button>
                 </div>
               );
             })}
@@ -875,7 +924,7 @@ function VistaPorCobrar({ estado, onCobrar, ocupado }) {
 }
 
 // ===== Vista: cierre de turno (Fase 3) =====
-function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
+function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVacia, ocupado }) {
   const turno = estado.turno || {};
   const r = estado.resumenTurno || {};
   const cuentas = estado.cuentas || [];
@@ -885,6 +934,7 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
   const cobro = r.cobroDeudas || { efectivo: 0, transferencia: 0, tarjeta: 0, total: 0 };
   const cobroEfectivo = Number(cobro.efectivo) || 0;
   const cobroTotal = Number(cobro.total) || 0;
+  const descuentos = Number(r.descuentos) || 0;
   const cajaEsperada = base + efectivo + cobroEfectivo;
   const hayCuentasAbiertas = cuentas.length > 0;
   const hoy = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -898,7 +948,35 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
 
       {hayCuentasAbiertas && (
         <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 12, padding: 14, marginBottom: 16, color: '#791F1F', fontSize: 13 }}>
-          🔒 No puedes cerrar el turno todavía: tienes {cuentas.length} {cuentas.length === 1 ? 'cuenta abierta' : 'cuentas abiertas'}. Cobra (o fía) y cierra cada cuenta primero para que la caja cuadre.
+          🔒 No puedes cerrar el turno todavía: tienes {cuentas.length} {cuentas.length === 1 ? 'cuenta abierta' : 'cuentas abiertas'}. Cobra (o fía) y cierra cada una para que la caja cuadre.
+          {/* Antes solo se decía CUÁNTAS, no CUÁLES. Si alguien abría una cuenta
+              por error y se olvidaba, el turno quedaba trabado sin pista de qué
+              lo bloqueaba (pasó con el turno del 2026-06-30: 7 semanas trabado
+              por una cuenta vacía). Ahora las listamos y se puede saltar a
+              cada una, o cancelar en el acto las que están vacías. */}
+          <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+            {cuentas.map((c) => {
+              const nombres = (c.jugadores || []).map((j) => j.nombre).join(' · ') || 'Sin jugadores';
+              const cancha = CANCHAS.find((x) => x.id === c.cancha_id);
+              const totalC = totalCuenta(c);
+              const vacia = totalC === 0 && (c.pagos || []).length === 0;
+              return (
+                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'white', borderRadius: 10, padding: '10px 12px' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, color: '#1A3D4D' }}>{cancha ? cancha.nombre : 'Cuenta sin cancha'} · {nombres}</div>
+                    <div style={{ fontSize: 11, color: '#5C7785', marginTop: 2 }}>
+                      {vacia ? 'Vacía: sin consumos ni pagos (se puede cancelar)' : `Total ${fmt(totalC)} · pagado ${fmt(totalPagado(c))}`}
+                    </div>
+                  </div>
+                  {vacia ? (
+                    <button onClick={() => onCancelarVacia(c.id)} disabled={ocupado} style={{ background: '#5C7785', color: 'white', border: 'none', padding: '8px 12px', borderRadius: 8, fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>✕ Cancelar</button>
+                  ) : (
+                    <button onClick={() => onVerCuenta(c.id)} disabled={ocupado} style={{ background: '#1A3D4D', color: 'white', border: 'none', padding: '8px 12px', borderRadius: 8, fontWeight: 700, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>Ir a cobrar →</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -919,6 +997,16 @@ function VistaCierre({ estado, onConfirmar, onVolver, ocupado }) {
           <div style={{ borderTop: '2px solid #1A3D4D', marginTop: 10, paddingTop: 10 }}>
             <Fila icon="📊" label="VENTAS TOTALES" value={r.totalVentas} color="#1A3D4D" bold />
           </div>
+          {/* Los descuentos ya se calculaban en /api/data pero NUNCA se mostraban
+              aquí. Sin esta línea el reporte no explica por qué lo consumido y
+              lo vendido no coinciden, y un descuento mal usado (ej.: para tapar
+              un pago digitado con un cero de más) pasaba inadvertido. */}
+          {descuentos > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <Fila icon="🏷️" label="Descuentos aplicados" value={descuentos} color="#8E44AD" />
+              <div style={{ fontSize: 10, color: '#8A7B5F', marginTop: 2, lineHeight: 1.4 }}>No es dinero: es lo que se dejó de cobrar. Consumido = ventas + descuentos.</div>
+            </div>
+          )}
         </div>
 
         {cobroTotal > 0 && (
@@ -1271,7 +1359,13 @@ function ModalDescuento({ cuenta, onConfirmar, onCancelar, ocupado }) {
   const [jugadorId, setJugadorId] = useState(null);
   const [monto, setMonto] = useState('');
   const [motivo, setMotivo] = useState('');
-  const valido = Number(monto) > 0 && motivo.trim() !== '';
+  // Un descuento NUNCA puede superar lo que falta por cobrar: descontar de más
+  // equivale a regalar dinero ya recibido y descuadra la caja del cierre.
+  // Sin este tope, el 2026-06-20 se aceptó un descuento de $819.000 sobre una
+  // cuenta que ya no debía nada — se usó para tapar un pago digitado con un
+  // cero de más, porque entonces no se podían borrar pagos. Ahora sí se pueden.
+  const excede = Number(monto) > pendiente;
+  const valido = Number(monto) > 0 && motivo.trim() !== '' && !excede;
 
   // Al elegir un jugador, sugerimos su parte como monto (editable).
   function elegirJugador(id) {
@@ -1306,6 +1400,14 @@ function ModalDescuento({ cuenta, onConfirmar, onCancelar, ocupado }) {
       </div>
       {pendiente > 0 && (
         <button onClick={() => setMonto(String(pendiente))} style={{ background: 'transparent', border: 'none', color: '#8E44AD', cursor: 'pointer', fontWeight: 700, fontSize: 11, marginBottom: 14 }}>Descontar todo lo que falta ({fmt(pendiente)})</button>
+      )}
+      {excede && (
+        <div style={{ background: '#FCEBEB', border: '2px solid #C0392B', borderRadius: 10, padding: 10, marginBottom: 14, color: '#791F1F', fontSize: 12, lineHeight: 1.45 }}>
+          ⚠ El descuento no puede superar lo que falta por cobrar ({fmt(pendiente)}).
+          {pendiente === 0
+            ? ' Esta cuenta ya está saldada. Si lo que quieres es corregir un pago mal digitado, bórralo con el 🗑 en "Pagos registrados" y regístralo de nuevo.'
+            : ' Baja el monto, o revisa si en realidad hay un pago mal digitado que debas borrar.'}
+        </div>
       )}
 
       <label style={lbl}>Motivo</label>
