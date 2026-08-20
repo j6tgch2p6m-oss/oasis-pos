@@ -1,12 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { CANCHAS } from '../../lib/canchas';
 
 const CATEGORIAS = ['Alquiler cancha', 'Accesorios', 'Bebidas', 'Cervezas', 'Snacks'];
-const CANCHAS = [
-  { id: 'C1', nombre: 'Cancha 1' },
-  { id: 'C2', nombre: 'Cancha 2' },
-];
 const METODOS = [
   { v: 'efectivo', label: 'Efectivo', icon: '💵', color: '#27AE60' },
   { v: 'transferencia', label: 'Transferencia', icon: '🔁', color: '#2E84A6' },
@@ -240,6 +237,7 @@ export default function POSApp() {
             estado={estado}
             onAbrirCancha={(canchaId) => setModal({ tipo: 'nuevaCuenta', canchaId })}
             onNuevaSuelta={() => setModal({ tipo: 'nuevaCuenta', canchaId: null })}
+            onNuevaCuenta={() => setModal({ tipo: 'nuevaCuenta', canchaId: null })}
             onVerCuenta={(id) => { setCuentaActivaId(id); setVista('cuenta'); }}
             onPorCobrar={() => setVista('porCobrar')}
             onCerrarTurno={() => setVista('cierre')}
@@ -291,6 +289,24 @@ export default function POSApp() {
                     : prev.cuentasPorCobrar;
                   return { ...prev, cuentas, cuentasPorCobrar };
                 });
+              }
+            }}
+            onMover={async (canchaDestino) => {
+              const cid = cuentaActiva.id;
+              const r = await llamarApi('/api/cuenta', 'PATCH', {
+                cuentaId: cid,
+                accion: 'mover',
+                cancha_id: canchaDestino,
+              });
+              if (r?.ok && r.cuenta) {
+                // Reflejamos el cambio de inmediato para que la ficha de la
+                // cancha y el título se actualicen sin esperar la recarga.
+                setEstado((prev) => ({
+                  ...(prev || {}),
+                  cuentas: ((prev && prev.cuentas) || []).map((c) =>
+                    c.id === cid ? { ...c, cancha_id: r.cuenta.cancha_id, tipo: r.cuenta.tipo } : c
+                  ),
+                }));
               }
             }}
             onEliminarConsumo={async (consumoId) => {
@@ -364,8 +380,11 @@ export default function POSApp() {
         <ModalNuevaCuenta
           canchaId={modal.canchaId}
           ocupado={ocupado}
-          onCrear={async (jugadores) => {
-            const canchaId = modal.canchaId;
+          onCrear={async (jugadores, destino) => {
+            // `destino` viene del selector del modal, no de dónde se tocó: la
+            // cajera puede haber entrado por la ficha de una cancha y cambiarlo
+            // a "sin cancha" (o a la otra cancha) antes de confirmar.
+            const canchaId = destino || null;
             const r = await llamarApi('/api/cuenta', 'POST', {
               turno_id: turno.id,
               tipo: canchaId ? 'cancha' : 'individual',
@@ -663,7 +682,7 @@ function VistaInicio({ onAbrir, onForzarCierre, ocupado }) {
 }
 
 // ===== Vista: home =====
-function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCobrar, onCerrarTurno }) {
+function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onNuevaCuenta, onVerCuenta, onPorCobrar, onCerrarTurno }) {
   const cuentas = estado.cuentas || [];
   const cxc = estado.cuentasPorCobrar || [];
   const resumen = estado.resumenTurno || {};
@@ -678,38 +697,50 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
         <Kpi label="Por cobrar" value={fmt(totalCxc)} color="#C0392B" onClick={onPorCobrar} />
       </div>
 
+      {/* Creación libre: desde aquí se elige adentro si la cuenta va a una
+          cancha o es de una persona. Las fichas de cancha de abajo siguen
+          sirviendo como atajo, pero ya no son la única puerta de entrada. */}
+      <button onClick={onNuevaCuenta} style={{ ...btnPri, width: '100%', background: 'linear-gradient(135deg,#1A3D4D,#2E84A6)', color: 'white', fontSize: 15, marginBottom: 24 }}>+ NUEVA CUENTA</button>
+
       <Titulo>Canchas</Titulo>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 28 }}>
         {CANCHAS.map((cancha) => {
-          const cuenta = cuentas.find((c) => c.cancha_id === cancha.id);
-          const ocupada = !!cuenta;
+          // Varias cuentas pueden convivir en la misma cancha (dos parejas que
+          // la comparten, cada una con su cuenta). Antes esto era un .find(),
+          // que se quedaba con la primera y escondía las demás.
+          const enCancha = cuentas.filter((c) => c.cancha_id === cancha.id);
+          const ocupada = enCancha.length > 0;
           return (
-            <button key={cancha.id} onClick={() => (ocupada ? onVerCuenta(cuenta.id) : onAbrirCancha(cancha.id))} style={{ position: 'relative', background: ocupada ? 'linear-gradient(135deg,#1A3D4D,#2E84A6)' : 'linear-gradient(135deg,#fff,#f8f5ec)', color: ocupada ? 'white' : '#1A3D4D', border: ocupada ? 'none' : '2px dashed #60AEBF', borderRadius: 18, padding: 24, cursor: 'pointer', textAlign: 'left', minHeight: 150, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontFamily: 'inherit' }}>
-              {ocupada && <div style={{ position: 'absolute', top: 18, right: 18, background: '#F2B749', color: '#1A3D4D', fontSize: 10, fontWeight: 800, padding: '4px 9px', borderRadius: 18 }}>EN JUEGO</div>}
-              <div>
-                <div className="display" style={{ fontSize: 26, fontWeight: 800 }}>{cancha.nombre}</div>
-                {ocupada ? (
-                  <div style={{ marginTop: 6, opacity: 0.85, fontSize: 13 }}>
-                    <div>👥 {(cuenta.jugadores || []).map((j) => j.nombre).join(' · ')}</div>
-                    <div style={{ fontWeight: 800, fontSize: 17, marginTop: 6, color: '#F2B749' }}>{fmt(totalCuenta(cuenta))}</div>
-                  </div>
-                ) : (
-                  <div style={{ marginTop: 6, color: '#5C7785', fontSize: 13 }}>Toca para abrir cuenta</div>
-                )}
-              </div>
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: ocupada ? 'rgba(255,255,255,0.15)' : '#2E84A6', color: 'white', padding: '7px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, width: 'fit-content' }}>{ocupada ? 'Ver cuenta →' : '+ Abrir cuenta'}</div>
-            </button>
+            <div key={cancha.id} style={{ position: 'relative', background: ocupada ? 'linear-gradient(135deg,#1A3D4D,#2E84A6)' : 'linear-gradient(135deg,#fff,#f8f5ec)', color: ocupada ? 'white' : '#1A3D4D', border: ocupada ? 'none' : '2px dashed #60AEBF', borderRadius: 18, padding: 18, minHeight: 150, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {ocupada && <div style={{ position: 'absolute', top: 16, right: 16, background: '#F2B749', color: '#1A3D4D', fontSize: 10, fontWeight: 800, padding: '4px 9px', borderRadius: 18 }}>{enCancha.length === 1 ? 'EN JUEGO' : `${enCancha.length} CUENTAS`}</div>}
+              <div className="display" style={{ fontSize: 24, fontWeight: 800 }}>{cancha.nombre}</div>
+
+              {ocupada ? (
+                <div style={{ display: 'grid', gap: 7, flex: 1 }}>
+                  {enCancha.map((c) => (
+                    <button key={c.id} onClick={() => onVerCuenta(c.id)} style={{ background: 'rgba(255,255,255,0.14)', border: 'none', borderRadius: 10, padding: '9px 11px', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', color: 'white' }}>
+                      <div style={{ fontSize: 12, fontWeight: 700 }}>👥 {(c.jugadores || []).map((j) => j.nombre).join(' · ') || 'Sin jugadores'}</div>
+                      <div style={{ fontWeight: 800, fontSize: 15, marginTop: 3, color: '#F2B749' }}>{fmt(totalCuenta(c))}</div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ flex: 1, color: '#5C7785', fontSize: 13 }}>Libre. Toca para abrir una cuenta.</div>
+              )}
+
+              <button onClick={() => onAbrirCancha(cancha.id)} style={{ background: ocupada ? 'rgba(255,255,255,0.2)' : '#2E84A6', color: 'white', border: 'none', padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', width: '100%' }}>+ {ocupada ? 'Otra cuenta aquí' : 'Abrir cuenta'}</button>
+            </div>
           );
         })}
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <Titulo sinMargen>Otras cuentas</Titulo>
-        <button onClick={onNuevaSuelta} style={{ background: '#1A3D4D', color: 'white', border: 'none', padding: '8px 14px', borderRadius: 9, fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>+ Nueva cuenta sin cancha</button>
+        <Titulo sinMargen>Cuentas por persona</Titulo>
+        <button onClick={onNuevaSuelta} style={{ background: '#1A3D4D', color: 'white', border: 'none', padding: '8px 14px', borderRadius: 9, fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>+ Sin cancha</button>
       </div>
       <div style={{ marginBottom: 20 }}>
         {sueltas.length === 0 ? (
-          <div style={{ background: 'rgba(255,255,255,0.5)', border: '2px dashed #C8B987', borderRadius: 14, padding: 24, textAlign: 'center', color: '#8A7B5F', fontSize: 13 }}>Sin cuentas sueltas. Útiles para torneos o bar.</div>
+          <div style={{ background: 'rgba(255,255,255,0.5)', border: '2px dashed #C8B987', borderRadius: 14, padding: 24, textAlign: 'center', color: '#8A7B5F', fontSize: 13 }}>Sin cuentas por persona. Útiles para el bar, torneos, o alguien que consume sin jugar.</div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(240px,1fr))', gap: 10 }}>
             {sueltas.map((c) => (
@@ -731,7 +762,7 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onVerCuenta, onPorCob
 }
 
 // ===== Vista: detalle de cuenta =====
-function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onEliminarPago, onCerrar, onAbonoReserva, onDescuento, onEliminarDescuento, ocupado }) {
+function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo, onEliminarPago, onMover, onCerrar, onAbonoReserva, onDescuento, onEliminarDescuento, ocupado }) {
   const total = totalCuenta(cuenta);
   const pagado = totalPagado(cuenta);
   const descuentos = totalDescuentos(cuenta);
@@ -860,6 +891,20 @@ function VistaCuenta({ cuenta, productos, onAgregar, onCobrar, onEliminarConsumo
           </div>
         </>
       )}
+
+      {/* Cambiar de sitio sin cerrar ni recargar la cuenta: un grupo puede
+          empezar en una cancha y terminar como cuenta individual (o al revés,
+          o mudarse a la otra cancha). El tipo ya no se decide para siempre al
+          crear la cuenta. */}
+      <div style={{ background: 'white', borderRadius: 14, padding: 14, marginBottom: 16, boxShadow: '0 3px 12px rgba(0,0,0,0.04)' }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 8 }}>UBICACIÓN DE LA CUENTA</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+          {CANCHAS.map((c) => (
+            <button key={c.id} onClick={() => cuenta.cancha_id !== c.id && onMover(c.id)} disabled={ocupado} style={chip(cuenta.cancha_id === c.id)}>{cuenta.cancha_id === c.id ? '✓ ' : ''}{c.nombre}</button>
+          ))}
+          <button onClick={() => cuenta.cancha_id && onMover(null)} disabled={ocupado} style={chip(!cuenta.cancha_id)}>{!cuenta.cancha_id ? '✓ ' : ''}Sin cancha (persona)</button>
+        </div>
+      </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
         <button onClick={onAgregar} disabled={ocupado} style={{ ...btnPri, background: '#2E84A6', color: 'white' }}>+ AGREGAR PRODUCTO</button>
@@ -1071,13 +1116,24 @@ function MiniStat({ label, value }) {
 // ===== Modal: nueva cuenta =====
 function ModalNuevaCuenta({ canchaId, onCrear, onCancelar, ocupado }) {
   const [jugadores, setJugadores] = useState(['', '', '', '']);
+  // La cancha ya no queda fijada por dónde tocaste: llega solo como valor
+  // inicial y se puede cambiar aquí mismo (incluido "sin cancha").
+  const [destino, setDestino] = useState(canchaId || null);
   const set = (i, v) => { const j = [...jugadores]; j[i] = v; setJugadores(j); };
   const validos = jugadores.filter((j) => j.trim() !== '');
-  const cancha = CANCHAS.find((c) => c.id === canchaId);
+  const cancha = CANCHAS.find((c) => c.id === destino);
   return (
     <Modal onClose={onCancelar}>
       <div className="display" style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>{cancha ? `Abrir ${cancha.nombre}` : 'Nueva cuenta'}</div>
-      <p style={{ color: '#5C7785', fontSize: 13, marginBottom: 20 }}>¿Quiénes van a jugar / consumir?</p>
+      <p style={{ color: '#5C7785', fontSize: 13, marginBottom: 16 }}>¿Quiénes van a jugar / consumir?</p>
+
+      <label style={lbl}>¿Dónde?</label>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, margin: '6px 0 18px' }}>
+        {CANCHAS.map((c) => (
+          <button key={c.id} onClick={() => setDestino(c.id)} style={chip(destino === c.id)}>{destino === c.id ? '✓ ' : ''}{c.nombre}</button>
+        ))}
+        <button onClick={() => setDestino(null)} style={chip(destino === null)}>{destino === null ? '✓ ' : ''}Sin cancha (persona)</button>
+      </div>
       <div style={{ marginBottom: 20 }}>
         {jugadores.map((j, i) => (
           <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
@@ -1090,7 +1146,7 @@ function ModalNuevaCuenta({ canchaId, onCrear, onCancelar, ocupado }) {
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onCancelar} style={btnSec}>Cancelar</button>
-        <button onClick={() => validos.length > 0 && onCrear(validos)} disabled={validos.length === 0 || ocupado} style={{ ...btnPri, flex: 2, background: validos.length > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: validos.length > 0 ? 'white' : '#999' }}>{ocupado ? 'Creando…' : 'ABRIR CUENTA →'}</button>
+        <button onClick={() => validos.length > 0 && onCrear(validos, destino)} disabled={validos.length === 0 || ocupado} style={{ ...btnPri, flex: 2, background: validos.length > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: validos.length > 0 ? 'white' : '#999' }}>{ocupado ? 'Creando…' : 'ABRIR CUENTA →'}</button>
       </div>
     </Modal>
   );

@@ -112,7 +112,10 @@ export function CanchasVivo({ canchas }) {
             {k.ocupada && (
               <div style={{ marginTop: 8, fontSize: 12, color: C.textoTenue }}>
                 <div>{k.jugadores && k.jugadores.length ? k.jugadores.join(', ') : 'Sin jugadores'}</div>
-                <div style={{ marginTop: 2 }}>{k.minutos} min en juego</div>
+                <div style={{ marginTop: 2 }}>
+                  {k.minutos} min en juego
+                  {k.cuentas > 1 ? ` · ${k.cuentas} cuentas` : ''}
+                </div>
               </div>
             )}
           </div>

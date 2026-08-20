@@ -1,4 +1,5 @@
 import { supabase } from '../../../../lib/supabase';
+import { CANCHAS } from '../../../../lib/canchas';
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
@@ -37,12 +38,6 @@ function fechaBogota(date) {
 }
 
 const DIAS_SEMANA = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
-
-// Catálogo de canchas (igual que el POS: app/components/POSApp.js).
-const CANCHAS = [
-  { id: 'C1', nombre: 'Cancha 1' },
-  { id: 'C2', nombre: 'Cancha 2' },
-];
 
 function sumar(arr, getter) {
   return arr.reduce((s, x) => s + (Number(getter(x)) || 0), 0);
@@ -284,17 +279,25 @@ export async function GET() {
         (c) => c.turno_id === turno.id && !c.cerrada && c.tipo === 'cancha'
       );
       canchasVivo = CANCHAS.map((k) => {
-        const cu = abiertasCancha.find((c) => c.cancha_id === k.id);
-        if (!cu) return { ...k, ocupada: false };
-        const jug = jugadores
-          .filter((j) => j.cuenta_id === cu.id)
-          .sort((a, b) => (a.orden || 0) - (b.orden || 0))
-          .map((j) => j.nombre);
+        // Una cancha puede tener VARIAS cuentas abiertas a la vez (dos parejas
+        // que la comparten). Antes esto era un .find() y solo reportaba la
+        // primera, así que el panel mostraba de menos.
+        const enCancha = abiertasCancha.filter((c) => c.cancha_id === k.id);
+        if (enCancha.length === 0) return { ...k, ocupada: false };
+        const jug = enCancha.flatMap((cu) =>
+          jugadores
+            .filter((j) => j.cuenta_id === cu.id)
+            .sort((a, b) => (a.orden || 0) - (b.orden || 0))
+            .map((j) => j.nombre)
+        );
+        // Minutos = desde la cuenta MÁS ANTIGUA que sigue abierta en la cancha.
+        const desde = Math.min(...enCancha.map((cu) => new Date(cu.fecha_apertura).getTime()));
         return {
           ...k,
           ocupada: true,
+          cuentas: enCancha.length,
           jugadores: jug,
-          minutos: Math.max(0, Math.round((Date.now() - new Date(cu.fecha_apertura).getTime()) / 60000)),
+          minutos: Math.max(0, Math.round((Date.now() - desde) / 60000)),
         };
       });
     }
