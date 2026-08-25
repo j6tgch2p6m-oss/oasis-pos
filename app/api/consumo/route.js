@@ -28,20 +28,34 @@ export async function POST(request) {
     if (!Number.isInteger(cantidadNum) || cantidadNum <= 0) {
       return NextResponse.json({ error: 'La cantidad debe ser un entero mayor que cero' }, { status: 400, ...noStore });
     }
-    // precio_unitario y total son NOT NULL en la BD: si llegaban nulos, el insert
-    // devolvía un 500 ("violates not-null constraint"). Validamos aquí para
-    // responder siempre un 400 claro y nunca un 500 por datos incompletos.
-    const precioNum = Number(body.precio_unitario);
-    if (!Number.isFinite(precioNum) || precioNum < 0) {
+    const precioNum = body.precio_unitario == null ? null : Number(body.precio_unitario);
+    if (precioNum != null && !Number.isFinite(precioNum)) {
       return NextResponse.json({ error: 'Precio unitario inválido' }, { status: 400, ...noStore });
     }
-    const totalNum = Number(body.total);
-    if (!Number.isFinite(totalNum) || totalNum < 0) {
-      return NextResponse.json({ error: 'Total del consumo inválido' }, { status: 400, ...noStore });
+    // `body.total` ya no se usa: el total se recalcula abajo como precio ×
+    // cantidad, así que aceptarlo del cliente solo abriría la puerta a que no
+    // cuadren entre sí.
+
+    // El precio lo decide el SERVIDOR, no el cliente. Salvo que el producto esté
+    // marcado como `precio_editable` (las clases, que valen distinto según el
+    // profesor), se usa el precio del catálogo y se ignora el que llegue en el
+    // body. Y el total siempre se recalcula: así un error de la interfaz no
+    // puede meter un cobro por un valor que no corresponde.
+    let precioFinal = precioNum;
+    if (producto_id) {
+      const { data: prod, error: errProd } = await supabase
+        .from('productos')
+        .select('*')
+        .eq('id', producto_id)
+        .maybeSingle();
+      if (errProd) throw errProd;
+      if (prod && !prod.precio_editable) {
+        precioFinal = Number(prod.precio) || 0;
+      }
     }
-    // asignacion_jugadores es jsonb NOT NULL: normalizamos a arreglo ([] si no
-    // llega) para no violar la restricción ni romper el cálculo de split.
-    const asignacion = Array.isArray(asignacion_jugadores) ? asignacion_jugadores : [];
+    if (precioFinal == null || !Number.isFinite(precioFinal) || precioFinal < 0) {
+      return NextResponse.json({ error: 'Precio inválido para este producto' }, { status: 400, ...noStore });
+    }
 
     const { data, error } = await supabase
       .from('consumos')
@@ -49,11 +63,11 @@ export async function POST(request) {
         cuenta_id,
         producto_id: producto_id || null,
         nombre_snapshot,
-        precio_unitario: precioNum,
+        precio_unitario: precioFinal,
         cantidad: cantidadNum,
-        total: totalNum,
+        total: precioFinal * cantidadNum,
         tipo_asignacion,
-        asignacion_jugadores: asignacion,
+        asignacion_jugadores: asignacion_jugadores ?? null,
       })
       .select()
       .single();
@@ -68,9 +82,6 @@ export async function POST(request) {
 export async function DELETE(request) {
   try {
     const { consumoId } = await request.json();
-    if (!consumoId) {
-      return NextResponse.json({ error: 'Falta el consumo a eliminar' }, { status: 400, ...noStore });
-    }
     const { error } = await supabase.from('consumos').delete().eq('id', consumoId);
     if (error) throw error;
     return NextResponse.json({ ok: true }, noStore);

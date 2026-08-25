@@ -1161,18 +1161,32 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
   const [individual, setIndividual] = useState(null);
   const jugadores = cuenta.jugadores || [];
   const [seleccionados, setSeleccionados] = useState(jugadores.map((j) => j.id));
+  // Productos de precio libre (marcados con precio_editable en el catálogo):
+  // el monto se teclea aquí en vez de salir fijo. Son las clases, que valen
+  // distinto según el profesor, y a veces $0 porque se le pagó directo.
+  const [precioManual, setPrecioManual] = useState('');
   const filtrados = productos.filter((p) => p.categoria === cat);
   const producto = productos.find((p) => p.id === sel);
-  const puede = producto && cant > 0 && (tipo === 'individual' ? individual : seleccionados.length > 0);
+  const editable = !!(producto && producto.precio_editable);
+  // Exigimos que la cajera escriba algo (aunque sea 0) para que poner $0 sea
+  // una decisión consciente y no un descuido.
+  const precioOk = !editable || (precioManual !== '' && Number.isFinite(Number(precioManual)) && Number(precioManual) >= 0);
+  const precioUnit = editable ? Number(precioManual || 0) : Number(producto ? producto.precio : 0);
+  const puede = producto && cant > 0 && precioOk && (tipo === 'individual' ? individual : seleccionados.length > 0);
+
+  function elegirProducto(id) {
+    setSel(id);
+    setPrecioManual(''); // cada producto arranca con su propio monto en blanco
+  }
 
   function confirmar() {
     if (!puede) return;
     onAgregar({
       producto_id: producto.id,
       nombre_snapshot: producto.nombre,
-      precio_unitario: producto.precio,
+      precio_unitario: precioUnit,
       cantidad: cant,
-      total: Number(producto.precio) * cant,
+      total: precioUnit * cant,
       tipo_asignacion: tipo,
       asignacion_jugadores: tipo === 'individual' ? [individual] : seleccionados,
     });
@@ -1188,15 +1202,29 @@ function ModalAgregarProducto({ cuenta, productos, onAgregar, onCancelar, ocupad
       </div>
       <div style={{ maxHeight: 200, overflowY: 'auto', marginBottom: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(120px,1fr))', gap: 6 }}>
         {filtrados.map((p) => (
-          <button key={p.id} onClick={() => setSel(p.id)} style={{ padding: '10px 8px', borderRadius: 10, border: sel === p.id ? '2px solid #2E84A6' : '2px solid #E5E5E5', background: sel === p.id ? '#E8F4F8' : 'white', cursor: 'pointer', textAlign: 'left' }}>
+          <button key={p.id} onClick={() => elegirProducto(p.id)} style={{ padding: '10px 8px', borderRadius: 10, border: sel === p.id ? '2px solid #2E84A6' : '2px solid #E5E5E5', background: sel === p.id ? '#E8F4F8' : 'white', cursor: 'pointer', textAlign: 'left' }}>
             <div style={{ fontSize: 18, marginBottom: 3 }}>{p.icono}</div>
             <div style={{ fontSize: 11, fontWeight: 700, lineHeight: 1.2 }}>{p.nombre}</div>
-            <div style={{ fontSize: 10, color: '#2E84A6', fontWeight: 700, marginTop: 3 }}>{fmt(p.precio)}</div>
+            <div style={{ fontSize: 10, color: p.precio_editable ? '#8E44AD' : '#2E84A6', fontWeight: 700, marginTop: 3 }}>{p.precio_editable ? 'Precio libre' : fmt(p.precio)}</div>
           </button>
         ))}
       </div>
       {producto && (
         <div>
+          {editable && (
+            <>
+              <label style={lbl}>Precio de esta clase</label>
+              <div style={{ position: 'relative', margin: '6px 0 4px' }}>
+                <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
+                <input type="number" min="0" value={precioManual} onChange={(e) => setPrecioManual(e.target.value)} placeholder="0" style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
+              </div>
+              <div style={{ fontSize: 11, color: '#8A7B5F', marginBottom: 16, lineHeight: 1.45 }}>
+                Escribe cuánto se cobra por esta clase. Si al profesor se le paga
+                directo y no entra a la caja, deja <strong>0</strong>: la clase queda
+                registrada igual.
+              </div>
+            </>
+          )}
           <label style={lbl}>Cantidad</label>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0 16px' }}>
             <button onClick={() => setCant(Math.max(1, cant - 1))} style={btnNum}>−</button>
