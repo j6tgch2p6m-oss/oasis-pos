@@ -81,7 +81,7 @@ export async function GET() {
     //  - último turno cerrado (alerta de descuadre de caja)
     //  - jugadores (nombres para canchas en vivo y top clientes)
     //  - descuentos del mes (reflejo en admin)
-    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes, ultCierreRes, jugadoresRes, descuentosRes] =
+    const [turnoRes, pagosRes, cuentasRes, cxcRes, consumosRes, ultCierreRes, jugadoresRes, descuentosRes, egresosRes] =
       await Promise.all([
         supabase
           .from('turnos')
@@ -105,6 +105,7 @@ export async function GET() {
           .select('*')
           .gte('created_at', inicioMes.toISOString())
           .order('created_at', { ascending: false }),
+        supabase.from('egresos').select('*').order('created_at', { ascending: false }),
       ]);
     if (turnoRes.error) throw turnoRes.error;
     if (pagosRes.error) throw pagosRes.error;
@@ -114,6 +115,7 @@ export async function GET() {
     if (ultCierreRes.error) throw ultCierreRes.error;
     if (jugadoresRes.error) throw jugadoresRes.error;
     if (descuentosRes.error) throw descuentosRes.error;
+    if (egresosRes.error) throw egresosRes.error;
 
     const turno = turnoRes.data && turnoRes.data.length ? turnoRes.data[0] : null;
     const pagos = pagosRes.data || [];
@@ -123,6 +125,7 @@ export async function GET() {
     const ultCierre = ultCierreRes.data && ultCierreRes.data.length ? ultCierreRes.data[0] : null;
     const jugadores = jugadoresRes.data || [];
     const descuentosMesData = descuentosRes.data || [];
+    const egresosTodos = egresosRes.data || [];
 
     // Ola 2: cobros de cartera hechos DURANTE el último turno cerrado
     // (entran a la caja en efectivo y cuentan para el descuadre).
@@ -246,7 +249,15 @@ export async function GET() {
         cobrosUltCierre.filter((r) => r.metodo_cobro === 'efectivo'),
         (r) => r.monto
       );
-      const esperado = (Number(ultCierre.base_caja) || 0) + efePagos + efeCobros;
+      // Los egresos del turno salieron del cajón: restan de lo esperado. Debe
+      // coincidir con la fórmula del POS (VistaCierre), o admin y POS dirían
+      // cosas distintas sobre la misma caja.
+      const egresosUltCierre = sumar(
+        egresosTodos.filter((e) => e.turno_id === ultCierre.id),
+        (e) => e.monto
+      );
+      const esperado =
+        (Number(ultCierre.base_caja) || 0) + efePagos + efeCobros - egresosUltCierre;
       const contado =
         ultCierre.efectivo_contado_cierre == null
           ? null
@@ -374,6 +385,21 @@ export async function GET() {
       })),
     };
 
+    // ---- EGRESOS DEL MES ----
+    const egresosMesData = egresosTodos.filter(
+      (e) => e.created_at && new Date(e.created_at).getTime() >= inicioMes.getTime()
+    );
+    const egresosMes = {
+      total: sumar(egresosMesData, (e) => e.monto),
+      cantidad: egresosMesData.length,
+      lista: egresosMesData.slice(0, 20).map((e) => ({
+        motivo: e.motivo,
+        monto: Number(e.monto) || 0,
+        cajera: e.cajera || null,
+        fecha: e.created_at,
+      })),
+    };
+
     return NextResponse.json(
       {
         generadoEn: ahora.toISOString(),
@@ -427,6 +453,7 @@ export async function GET() {
         ocupacionHora,
         reservasMes,
         descuentosMes,
+        egresosMes,
       },
       noStore
     );

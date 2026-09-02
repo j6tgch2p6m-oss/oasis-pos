@@ -61,7 +61,12 @@ export async function GET() {
       // día, pero corresponden a ventas fiadas de días anteriores: se muestran
       // aparte en el cierre y NO se cuentan como venta del día.
       cobroDeudas: { efectivo: 0, transferencia: 0, tarjeta: 0, total: 0 },
+      // Plata que SALIÓ de la caja en el turno (proveedores, domicilios). Se
+      // resta de la caja esperada: sin esto, todo retiro legítimo parecía un
+      // faltante al contar el efectivo.
+      egresos: 0,
     };
+    let egresos = [];
 
     if (turno) {
       // IMPORTANTE — por qué TODO usa .select('*'):
@@ -77,7 +82,7 @@ export async function GET() {
       // Ola 2: TODAS las cuentas del turno (una sola lectura; de aquí salen
       // tanto las abiertas para la vista como los ids para el resumen) +
       // deudas de cartera cobradas EN este turno (ingreso del día).
-      const [cuentasRes, cobrosRes] = await Promise.all([
+      const [cuentasRes, cobrosRes, egresosRes] = await Promise.all([
         supabase
           .from('cuentas')
           .select('*')
@@ -88,9 +93,18 @@ export async function GET() {
           .select('*')
           .eq('turno_cobro_id', turno.id)
           .eq('cobrado', true),
+        supabase
+          .from('egresos')
+          .select('*')
+          .eq('turno_id', turno.id)
+          .order('created_at'),
       ]);
       if (cuentasRes.error) throw cuentasRes.error;
       if (cobrosRes.error) throw cobrosRes.error;
+      if (egresosRes.error) throw egresosRes.error;
+
+      egresos = egresosRes.data || [];
+      resumenTurno.egresos = egresos.reduce((s, e) => s + (Number(e.monto) || 0), 0);
 
       const cuentasTurno = cuentasRes.data || [];
       const idsTurno = cuentasTurno.map((c) => c.id);
@@ -157,6 +171,7 @@ export async function GET() {
         productos: productosRes.data || [],
         cuentas,
         cuentasPorCobrar: cxcRes.data || [],
+        egresos,
         resumenTurno,
       },
       noStore

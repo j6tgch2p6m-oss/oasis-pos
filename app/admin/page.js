@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { C } from './ui';
 import Dashboard from './components/Dashboard';
+import Historico from './components/Historico';
+import Egresos from './components/Egresos';
 import TabPlaceholder from './components/TabPlaceholder';
 
 const TABS = [
@@ -122,13 +124,7 @@ export default function AdminShell() {
       {/* Contenido */}
       <div style={{ maxWidth: 1100, margin: '0 auto', padding: '18px 14px 60px' }}>
         {tab === 'dashboard' && <Dashboard />}
-        {tab === 'historico' && (
-          <TabPlaceholder
-            icono="📈"
-            titulo="Histórico"
-            descripcion="Gráficas mensuales y comparativos mes contra mes."
-          />
-        )}
+        {tab === 'historico' && <Historico />}
         {tab === 'clientes' && (
           <TabPlaceholder
             icono="👥"
@@ -143,13 +139,7 @@ export default function AdminShell() {
             descripcion="Catálogo con edición de costos, margen % y rotación por producto."
           />
         )}
-        {tab === 'egresos' && (
-          <TabPlaceholder
-            icono="💸"
-            titulo="Egresos"
-            descripcion="Gastos por categoría y control de proveedores."
-          />
-        )}
+        {tab === 'egresos' && <Egresos />}
       </div>
     </div>
   );

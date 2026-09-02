@@ -240,6 +240,7 @@ export default function POSApp() {
             onNuevaCuenta={() => setModal({ tipo: 'nuevaCuenta', canchaId: null })}
             onVerCuenta={(id) => { setCuentaActivaId(id); setVista('cuenta'); }}
             onPorCobrar={() => setVista('porCobrar')}
+            onEgreso={() => setModal({ tipo: 'egreso' })}
             onCerrarTurno={() => setVista('cierre')}
           />
         )}
@@ -381,6 +382,43 @@ export default function POSApp() {
           />
         )}
       </div>
+
+      {modal?.tipo === 'egreso' && turno && (
+        <ModalEgreso
+          egresos={estado.egresos || []}
+          ocupado={ocupado}
+          onCancelar={() => setModal(null)}
+          onConfirmar={async (monto, motivo) => {
+            const r = await llamarApi('/api/egreso', 'POST', {
+              turno_id: turno.id,
+              monto,
+              motivo,
+              cajera: turno.cajera,
+            });
+            if (r?.egreso) {
+              // Reflejar de inmediato: el egreso cambia la caja esperada, y la
+              // cajera necesita verlo sin esperar la recarga.
+              setEstado((prev) => {
+                if (!prev) return prev;
+                const lista = [...(prev.egresos || []).filter((e) => e.id !== r.egreso.id), r.egreso];
+                const total = lista.reduce((s, e) => s + (Number(e.monto) || 0), 0);
+                return { ...prev, egresos: lista, resumenTurno: { ...(prev.resumenTurno || {}), egresos: total } };
+              });
+            }
+          }}
+          onEliminar={async (egresoId) => {
+            const r = await llamarApi('/api/egreso', 'DELETE', { egresoId });
+            if (r?.ok) {
+              setEstado((prev) => {
+                if (!prev) return prev;
+                const lista = (prev.egresos || []).filter((e) => e.id !== egresoId);
+                const total = lista.reduce((s, e) => s + (Number(e.monto) || 0), 0);
+                return { ...prev, egresos: lista, resumenTurno: { ...(prev.resumenTurno || {}), egresos: total } };
+              });
+            }
+          }}
+        />
+      )}
 
       {modal?.tipo === 'nuevaCuenta' && turno && (
         <ModalNuevaCuenta
@@ -688,10 +726,11 @@ function VistaInicio({ onAbrir, onForzarCierre, ocupado }) {
 }
 
 // ===== Vista: home =====
-function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onNuevaCuenta, onVerCuenta, onPorCobrar, onCerrarTurno }) {
+function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onNuevaCuenta, onVerCuenta, onPorCobrar, onEgreso, onCerrarTurno }) {
   const cuentas = estado.cuentas || [];
   const cxc = estado.cuentasPorCobrar || [];
   const resumen = estado.resumenTurno || {};
+  const totalEgresos = Number(resumen.egresos) || 0;
   const totalCxc = cxc.reduce((s, c) => s + (Number(c.monto) || 0), 0);
   const sueltas = cuentas.filter((c) => !c.cancha_id);
 
@@ -759,8 +798,13 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onNuevaCuenta, onVerC
         )}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
         <button onClick={onPorCobrar} style={{ background: 'white', border: '2px solid #C0392B', color: '#C0392B', padding: 14, borderRadius: 12, fontWeight: 700, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit' }}>⚠ Por Cobrar ({cxc.length})</button>
+        {/* Registrar plata que sale del cajón. Sin esto, cada retiro legítimo
+            aparecía como un faltante al contar el efectivo del cierre. */}
+        <button onClick={onEgreso} style={{ background: 'white', border: '2px solid #8E44AD', color: '#8E44AD', padding: 14, borderRadius: 12, fontWeight: 700, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit' }}>💸 Registrar egreso{totalEgresos > 0 ? ` (${fmt(totalEgresos)})` : ''}</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
         <button onClick={onCerrarTurno} style={{ background: 'linear-gradient(135deg,#F2B749,#E8A82B)', border: 'none', color: '#1A3D4D', padding: 14, borderRadius: 12, fontWeight: 800, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit' }}>🧾 CERRAR TURNO</button>
       </div>
     </div>
@@ -992,7 +1036,11 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
     ? Number(r.totalCobrado) || 0
     : efectivo + (Number(r.transferencia) || 0) + (Number(r.tarjeta) || 0);
   const recibidoTotal = cobrado + cobroTotal;
-  const cajaEsperada = base + efectivo + cobroEfectivo;
+  // Los egresos salen del cajón, así que RESTAN de lo que debe haber. Sin esta
+  // resta, cada retiro legítimo aparecía como un faltante al contar.
+  const totalEgresos = Number(r.egresos) || 0;
+  const listaEgresos = estado.egresos || [];
+  const cajaEsperada = base + efectivo + cobroEfectivo - totalEgresos;
   const hayCuentasAbiertas = cuentas.length > 0;
 
   // Conteo del efectivo al cerrar. La columna efectivo_contado_cierre y la
@@ -1109,6 +1157,21 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
           <Fila label="Base de apertura" value={base} />
           <Fila label="Ventas en efectivo" value={r.efectivo} />
           {cobroEfectivo > 0 && <Fila label="Cobro de deudas en efectivo" value={cobroEfectivo} />}
+          {totalEgresos > 0 && (
+            <>
+              <div style={{ borderTop: '1px dashed #C8B987', marginTop: 6, paddingTop: 6 }}>
+                <Fila label="− Egresos (salió de la caja)" value={-totalEgresos} color="#8E44AD" />
+              </div>
+              <div style={{ paddingLeft: 4 }}>
+                {listaEgresos.map((e) => (
+                  <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#8A7B5F', padding: '2px 0' }}>
+                    <span>· {e.motivo}</span>
+                    <span>−{fmt(e.monto)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           <div style={{ borderTop: '1px solid #C8B987', marginTop: 6, paddingTop: 6 }}>
             <Fila label="DEBE HABER EN CAJA" value={cajaEsperada} bold />
           </div>
@@ -1206,6 +1269,62 @@ function ModalNuevaCuenta({ canchaId, onCrear, onCancelar, ocupado }) {
       <div style={{ display: 'flex', gap: 8 }}>
         <button onClick={onCancelar} style={btnSec}>Cancelar</button>
         <button onClick={() => validos.length > 0 && onCrear(validos, destino)} disabled={validos.length === 0 || ocupado} style={{ ...btnPri, flex: 2, background: validos.length > 0 && !ocupado ? '#1A3D4D' : '#E5E5E5', color: validos.length > 0 ? 'white' : '#999' }}>{ocupado ? 'Creando…' : 'ABRIR CUENTA →'}</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Modal: registrar egreso (plata que sale de la caja) =====
+function ModalEgreso({ egresos, onConfirmar, onEliminar, onCancelar, ocupado }) {
+  const [monto, setMonto] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const valido = Number(monto) > 0 && motivo.trim() !== '';
+  const total = (egresos || []).reduce((s, e) => s + (Number(e.monto) || 0), 0);
+
+  return (
+    <Modal onClose={onCancelar}>
+      <div className="display" style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>💸 Registrar egreso</div>
+      <p style={{ color: '#5C7785', fontSize: 12, marginBottom: 16, lineHeight: 1.45 }}>
+        Plata que SALE de la caja: un proveedor, un domicilio, una compra. Se
+        descuenta de lo que debe haber en el cajón al cerrar.
+      </p>
+
+      <label style={lbl}>¿Cuánto salió?</label>
+      <div style={{ position: 'relative', margin: '6px 0 16px' }}>
+        <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
+        <input type="number" min="0" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" style={{ ...inp, paddingLeft: 30, fontSize: 18 }} />
+      </div>
+
+      <label style={lbl}>¿En qué se gastó?</label>
+      <input type="text" value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Ej: cerveza proveedor, domicilio, gasolina…" style={{ ...inp, margin: '6px 0 16px' }} />
+
+      {(egresos || []).length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 8 }}>YA REGISTRADOS EN ESTE TURNO · {fmt(total)}</div>
+          <div style={{ background: '#F7F7F7', borderRadius: 10, padding: 4, maxHeight: 150, overflowY: 'auto' }}>
+            {egresos.map((e) => (
+              <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>{e.motivo}</div>
+                  {e.cajera && <div style={{ fontSize: 10, color: '#5C7785' }}>{e.cajera}</div>}
+                </div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: '#8E44AD' }}>−{fmt(e.monto)}</div>
+                <button onClick={() => onEliminar(e.id)} disabled={ocupado} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#C0392B', padding: 2, fontSize: 15 }}>🗑</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onCancelar} style={btnSec}>Cerrar</button>
+        <button
+          onClick={() => valido && onConfirmar(Number(monto), motivo.trim())}
+          disabled={!valido || ocupado}
+          style={{ ...btnPri, flex: 2, background: valido && !ocupado ? '#8E44AD' : '#E5E5E5', color: valido ? 'white' : '#999' }}
+        >
+          {ocupado ? 'Guardando…' : 'REGISTRAR EGRESO →'}
+        </button>
       </div>
     </Modal>
   );
