@@ -128,6 +128,25 @@ export async function GET(request) {
       if (b) b.cuentas += 1;
     });
 
+    // Rellenamos los meses SIN actividad que quedan entre medio. Un mes en cero
+    // es información (el club estuvo cerrado, o el POS no se usó), y omitirlo
+    // haría que dos meses no consecutivos se vieran pegados en la gráfica y que
+    // la variación comparara contra el mes equivocado. Pasó de verdad: entre
+    // 2026-06-29 y 2026-08-20 no se registró un solo pago.
+    const clavesConDatos = Object.keys(porMes).sort();
+    if (clavesConDatos.length > 1) {
+      const [aIni, mIni] = clavesConDatos[0].split('-').map(Number);
+      const [aFin, mFin] = clavesConDatos[clavesConDatos.length - 1].split('-').map(Number);
+      let a = aIni;
+      let m = mIni;
+      while (a < aFin || (a === aFin && m <= mFin)) {
+        const k = `${a}-${String(m).padStart(2, '0')}`;
+        if (!porMes[k]) porMes[k] = nuevoBucket({ mes: k, label: etiquetaMes(k) });
+        m += 1;
+        if (m > 12) { m = 1; a += 1; }
+      }
+    }
+
     // Más reciente primero, con el ticket promedio y la variación contra el mes
     // anterior ya resueltos en el servidor (la vista solo pinta).
     const mesesAsc = Object.values(porMes).sort((a, b) => a.mes.localeCompare(b.mes));
