@@ -42,6 +42,12 @@ export async function GET() {
       transferencia: 0,
       tarjeta: 0,
       fiado: 0,
+      // DINERO QUE DE VERDAD ENTRÓ por ventas de hoy: efectivo + transferencia
+      // + tarjeta. El fiado NO cuenta aquí: es una venta hecha, pero la plata
+      // todavía no está. Separarlos es la única forma de saber cuánto se cobró.
+      totalCobrado: 0,
+      // Facturado del turno = totalCobrado + fiado. Sirve para medir la venta,
+      // no la caja.
       totalVentas: 0,
       cuentasCerradas: 0,
       productosVendidos: 0,
@@ -126,6 +132,7 @@ export async function GET() {
         const monto = Number(p.monto) || 0;
         if (resumenTurno[p.metodo] !== undefined) resumenTurno[p.metodo] += monto;
         resumenTurno.totalVentas += monto;
+        if (p.metodo !== 'fiado') resumenTurno.totalCobrado += monto;
         if (p.es_reserva) resumenTurno.reservas += monto;
       });
       resumenTurno.descuentos = descuentosTurno.reduce((s, dd) => s + (Number(dd.monto) || 0), 0);

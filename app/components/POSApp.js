@@ -361,8 +361,14 @@ export default function POSApp() {
                 }));
               }
             }}
-            onConfirmar={async () => {
-              const r = await llamarApi('/api/turno', 'PATCH', { turnoId: turno.id });
+            onConfirmar={async (efectivoContado) => {
+              // El efectivo contado va junto con el cierre: es el único momento
+              // en que se puede saber. Con él, el panel admin puede comparar
+              // esperado vs. real y avisar del descuadre.
+              const r = await llamarApi('/api/turno', 'PATCH', {
+                turnoId: turno.id,
+                efectivo_contado_cierre: efectivoContado,
+              });
               if (r?.ok) {
                 // Reflejar el cierre de inmediato: sin turno volvemos a la
                 // pantalla de inicio aunque la recarga de /api/data falle.
@@ -692,7 +698,7 @@ function VistaHome({ estado, onAbrirCancha, onNuevaSuelta, onNuevaCuenta, onVerC
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 20 }}>
-        <Kpi label="Vendido en el turno" value={fmt(resumen.totalVentas)} color="#2E84A6" />
+        <Kpi label="Cobrado en el turno" value={fmt(resumen.totalCobrado != null ? resumen.totalCobrado : resumen.totalVentas)} color="#2E84A6" />
         <Kpi label="Cuentas activas" value={cuentas.length} color="#60AEBF" />
         <Kpi label="Por cobrar" value={fmt(totalCxc)} color="#C0392B" onClick={onPorCobrar} />
       </div>
@@ -980,8 +986,22 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
   const cobroEfectivo = Number(cobro.efectivo) || 0;
   const cobroTotal = Number(cobro.total) || 0;
   const descuentos = Number(r.descuentos) || 0;
+  // Lo cobrado de las ventas de HOY, sin el fiado. Si el servidor todavía no
+  // manda totalCobrado (despliegue a medias), lo derivamos de los métodos.
+  const cobrado = r.totalCobrado != null
+    ? Number(r.totalCobrado) || 0
+    : efectivo + (Number(r.transferencia) || 0) + (Number(r.tarjeta) || 0);
+  const recibidoTotal = cobrado + cobroTotal;
   const cajaEsperada = base + efectivo + cobroEfectivo;
   const hayCuentasAbiertas = cuentas.length > 0;
+
+  // Conteo del efectivo al cerrar. La columna efectivo_contado_cierre y la
+  // alerta de descuadre del panel admin ya existían, pero el POS nunca pedía
+  // el dato: 40 turnos cerrados, 0 con efectivo contado. Sin esto, un
+  // descuadre solo se descubre mucho después (o nunca).
+  const [contado, setContado] = useState('');
+  const hayConteo = contado !== '' && Number.isFinite(Number(contado));
+  const diferencia = hayConteo ? Number(contado) - cajaEsperada : null;
   const hoy = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
 
   return (
@@ -1033,39 +1053,56 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
           <div style={{ fontSize: 12, color: '#5C7785' }}>Cajera: <strong>{turno.cajera}</strong> · Apertura: {fmt(base)}</div>
         </div>
 
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 10 }}>INGRESOS POR MÉTODO DE PAGO</div>
+        {/* BLOQUE 1 — LO QUE DE VERDAD SE COBRÓ.
+            Antes había un solo bloque "ingresos por método" donde el fiado
+            sumaba dentro de VENTAS TOTALES, así que ese número mezclaba plata
+            recibida con plata que aún se debe: no servía para saber cuánto
+            entró. Ahora el fiado vive en su propio bloque, abajo. */}
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 4 }}>DINERO RECIBIDO</div>
+          <div style={{ fontSize: 10, color: '#8A7B5F', marginBottom: 8, lineHeight: 1.4 }}>Plata que entró hoy. No incluye lo fiado.</div>
           <Fila icon="💵" label="Efectivo" value={r.efectivo} color="#27AE60" />
           <Fila icon="🔁" label="Transferencia" value={r.transferencia} color="#2E84A6" />
           <Fila icon="💳" label="Tarjeta" value={r.tarjeta} color="#8E44AD" />
-          <Fila icon="⚠" label="Fiado (no cobrado)" value={r.fiado} color="#C0392B" />
-          <div style={{ borderTop: '2px solid #1A3D4D', marginTop: 10, paddingTop: 10 }}>
-            <Fila icon="📊" label="VENTAS TOTALES" value={r.totalVentas} color="#1A3D4D" bold />
+          <div style={{ borderTop: '1px dashed #C8B987', marginTop: 8, paddingTop: 8 }}>
+            <Fila icon="🧾" label="Cobrado de ventas de hoy" value={cobrado} color="#1A3D4D" bold />
           </div>
-          {/* Los descuentos ya se calculaban en /api/data pero NUNCA se mostraban
-              aquí. Sin esta línea el reporte no explica por qué lo consumido y
-              lo vendido no coinciden, y un descuento mal usado (ej.: para tapar
-              un pago digitado con un cero de más) pasaba inadvertido. */}
-          {descuentos > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <Fila icon="🏷️" label="Descuentos aplicados" value={descuentos} color="#8E44AD" />
-              <div style={{ fontSize: 10, color: '#8A7B5F', marginTop: 2, lineHeight: 1.4 }}>No es dinero: es lo que se dejó de cobrar. Consumido = ventas + descuentos.</div>
+
+          {cobroTotal > 0 && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #C8B987' }}>
+              <div style={{ fontSize: 10, color: '#8A7B5F', marginBottom: 6, lineHeight: 1.4 }}>Deudas de días anteriores cobradas hoy. Es venta vieja, pero la plata entró hoy.</div>
+              <Fila icon="💵" label="Deudas · efectivo" value={cobro.efectivo} color="#27AE60" />
+              {Number(cobro.transferencia) > 0 && <Fila icon="🔁" label="Deudas · transferencia" value={cobro.transferencia} color="#2E84A6" />}
+              {Number(cobro.tarjeta) > 0 && <Fila icon="💳" label="Deudas · tarjeta" value={cobro.tarjeta} color="#8E44AD" />}
+              <Fila icon="📥" label="Cobrado de cartera" value={cobro.total} color="#1A3D4D" bold />
             </div>
           )}
+
+          <div style={{ borderTop: '2px solid #1A3D4D', marginTop: 10, paddingTop: 10 }}>
+            <Fila icon="✅" label="TOTAL RECIBIDO HOY" value={recibidoTotal} color="#27AE60" bold />
+          </div>
         </div>
 
-        {cobroTotal > 0 && (
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 4 }}>COBRO DE DEUDAS (DE OTROS DÍAS)</div>
-            <div style={{ fontSize: 10, color: '#8A7B5F', marginBottom: 8, lineHeight: 1.4 }}>Ventas fiadas en días anteriores que se cobraron HOY. No cuentan como venta de hoy, pero el dinero sí entró hoy a la caja.</div>
-            <Fila icon="💵" label="Efectivo" value={cobro.efectivo} color="#27AE60" />
-            <Fila icon="🔁" label="Transferencia" value={cobro.transferencia} color="#2E84A6" />
-            <Fila icon="💳" label="Tarjeta" value={cobro.tarjeta} color="#8E44AD" />
-            <div style={{ borderTop: '1px dashed #C8B987', marginTop: 8, paddingTop: 8 }}>
-              <Fila icon="📥" label="TOTAL COBRADO DE CARTERA" value={cobro.total} color="#1A3D4D" bold />
-            </div>
+        {/* BLOQUE 2 — LO QUE NO SE COBRÓ. Deliberadamente aparte y en rojo. */}
+        {Number(r.fiado) > 0 && (
+          <div style={{ background: '#FCEBEB', borderRadius: 12, padding: 14, marginBottom: 18 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#791F1F', letterSpacing: '0.05em', marginBottom: 4 }}>NO SE COBRÓ (QUEDÓ FIADO)</div>
+            <div style={{ fontSize: 10, color: '#791F1F', opacity: 0.8, marginBottom: 8, lineHeight: 1.4 }}>Se vendió pero la plata no entró. Queda como deuda en "Por cobrar".</div>
+            <Fila icon="⚠" label="Fiado de hoy" value={r.fiado} color="#C0392B" bold />
           </div>
         )}
+
+        {/* BLOQUE 3 — La venta como tal (facturado), solo como referencia. */}
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 8 }}>VENTA DEL TURNO (REFERENCIA)</div>
+          <Fila icon="📊" label="Vendido (cobrado + fiado)" value={r.totalVentas} color="#5C7785" />
+          {descuentos > 0 && (
+            <>
+              <Fila icon="🏷️" label="Descuentos aplicados" value={descuentos} color="#8E44AD" />
+              <div style={{ fontSize: 10, color: '#8A7B5F', marginTop: 2, lineHeight: 1.4 }}>No es dinero: es lo que se dejó de cobrar. Consumido = vendido + descuentos.</div>
+            </>
+          )}
+        </div>
 
         <div style={{ background: '#F2EBDC', borderRadius: 12, padding: 14, marginBottom: 14 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#5C7785', letterSpacing: '0.05em', marginBottom: 10 }}>CAJA FÍSICA (EFECTIVO)</div>
@@ -1074,6 +1111,28 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
           {cobroEfectivo > 0 && <Fila label="Cobro de deudas en efectivo" value={cobroEfectivo} />}
           <div style={{ borderTop: '1px solid #C8B987', marginTop: 6, paddingTop: 6 }}>
             <Fila label="DEBE HABER EN CAJA" value={cajaEsperada} bold />
+          </div>
+
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #C8B987' }}>
+            <label style={{ ...lbl, color: '#5C7785' }}>¿Cuánto efectivo hay realmente? (cuéntalo)</label>
+            <div style={{ position: 'relative', margin: '6px 0 0' }}>
+              <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 18, fontWeight: 700, color: '#5C7785' }}>$</span>
+              <input type="number" min="0" value={contado} onChange={(e) => setContado(e.target.value)} placeholder="Contar y escribir" style={{ ...inp, paddingLeft: 30, fontSize: 18, background: 'white' }} />
+            </div>
+            {hayConteo && (
+              <div style={{ marginTop: 10, padding: 10, borderRadius: 9, background: Math.abs(diferencia) < 1 ? '#E8F5E9' : '#FCEBEB', border: `2px solid ${Math.abs(diferencia) < 1 ? '#27AE60' : '#C0392B'}`, color: Math.abs(diferencia) < 1 ? '#1E6F3C' : '#791F1F', fontSize: 13, fontWeight: 700 }}>
+                {Math.abs(diferencia) < 1
+                  ? '✓ La caja cuadra exactamente.'
+                  : diferencia > 0
+                    ? `⚠ SOBRAN ${fmt(diferencia)} en la caja.`
+                    : `⚠ FALTAN ${fmt(Math.abs(diferencia))} en la caja.`}
+                {Math.abs(diferencia) >= 1 && (
+                  <div style={{ fontWeight: 400, marginTop: 4, lineHeight: 1.45 }}>
+                    Revisa si algún pago se digitó mal antes de cerrar. Puedes borrarlo con el 🗑 en la cuenta y registrarlo bien. Si cierras así, la diferencia queda guardada.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1086,7 +1145,7 @@ function VistaCierre({ estado, onConfirmar, onVolver, onVerCuenta, onCancelarVac
 
       <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <button onClick={onVolver} style={btnSec}>← Volver</button>
-        <button onClick={onConfirmar} disabled={ocupado || hayCuentasAbiertas} style={{ ...btnPri, flex: 2, background: ocupado || hayCuentasAbiertas ? '#999' : '#1A3D4D', color: 'white' }}>{ocupado ? 'Cerrando…' : hayCuentasAbiertas ? 'CIERRA LAS CUENTAS PRIMERO' : 'CERRAR TURNO DEFINITIVAMENTE'}</button>
+        <button onClick={() => onConfirmar(hayConteo ? Number(contado) : null)} disabled={ocupado || hayCuentasAbiertas} style={{ ...btnPri, flex: 2, background: ocupado || hayCuentasAbiertas ? '#999' : '#1A3D4D', color: 'white' }}>{ocupado ? 'Cerrando…' : hayCuentasAbiertas ? 'CIERRA LAS CUENTAS PRIMERO' : 'CERRAR TURNO DEFINITIVAMENTE'}</button>
       </div>
     </div>
   );

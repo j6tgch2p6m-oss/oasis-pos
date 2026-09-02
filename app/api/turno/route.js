@@ -107,8 +107,18 @@ export async function PATCH(request) {
       );
     }
     const cambios = { fecha_cierre: new Date().toISOString() };
+    // El efectivo contado es opcional (si la cajera no lo escribe, no se
+    // guarda), pero si viene tiene que ser un número válido: es el dato con el
+    // que el panel admin detecta descuadres de caja.
     if (efectivo_contado_cierre !== undefined && efectivo_contado_cierre !== null) {
-      cambios.efectivo_contado_cierre = efectivo_contado_cierre;
+      const contado = Number(efectivo_contado_cierre);
+      if (!Number.isFinite(contado) || contado < 0) {
+        return NextResponse.json(
+          { error: 'El efectivo contado debe ser un número mayor o igual a cero' },
+          { status: 400, ...noStore }
+        );
+      }
+      cambios.efectivo_contado_cierre = contado;
     }
     const { error } = await supabase.from('turnos').update(cambios).eq('id', turnoId);
     if (error) throw error;
