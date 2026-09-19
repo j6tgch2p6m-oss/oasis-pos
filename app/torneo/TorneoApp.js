@@ -955,7 +955,9 @@ const CSS = `
   min-height:100vh;background:var(--bg);color:var(--ink);font-family:'Plus Jakarta Sans',system-ui,sans-serif;font-size:15px;line-height:1.4;
   -webkit-user-select:none;user-select:none}
 .tq *{box-sizing:border-box}
-.tq button{font:inherit;color:inherit;cursor:pointer;border:0;background:none;padding:0}
+/* :where() deja el reset con especificidad 0 para que las clases de abajo
+   (.tq-btn, .tq-chip, .tq-prod…) ganen siempre el fondo y el padding. */
+:where(.tq) :where(button){font:inherit;color:inherit;cursor:pointer;border:0;background:none;padding:0}
 .tq button:disabled{opacity:.45;cursor:not-allowed}
 .tq input{font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:#fff;width:100%;-webkit-user-select:text;user-select:text}
 .tq input:focus,.tq button:focus-visible{outline:3px solid rgba(31,107,74,.35);outline-offset:1px}
