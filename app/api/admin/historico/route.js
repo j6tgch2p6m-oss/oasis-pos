@@ -55,6 +55,9 @@ function nuevoBucket(extra) {
     cobroCartera: 0,
     cuentas: 0,
     transacciones: 0,
+    // Parte de `cobrado` que vino del módulo /torneo. Se guarda aparte para
+    // poder mostrar cuánto pesó el evento sin sacarlo del total.
+    torneo: 0,
     ...extra,
   };
 }
@@ -93,6 +96,47 @@ export async function GET(request) {
     const descuentos = descuentosRes.data || [];
     const cobros = cxcRes.data || [];
 
+    // Módulo TORNEO. En su propio try para que el histórico no se caiga si las
+    // tablas todavía no existen. Plata que ENTRÓ: ventas pagadas (por su
+    // pagada_at) más los abonos de las cuentas de clientes. Las comandas
+    // pendientes y las cargadas a cuenta no se cuentan hasta que se cobran,
+    // igual que en el dashboard, así nada se suma dos veces.
+    let ingresosTorneo = [];
+    let comandasTorneo = [];
+    try {
+      const [vRes, pRes] = await Promise.all([
+        supabase.from('torneo_ventas').select('*'),
+        supabase.from('torneo_pagos').select('*'),
+      ]);
+      if (vRes.error || pRes.error) throw vRes.error || pRes.error;
+      const tVentas = vRes.data || [];
+      comandasTorneo = tVentas;
+      ingresosTorneo = [
+        ...tVentas
+          .filter((v) => v.estado === 'pagada' && v.metodo && v.pagada_at)
+          .map((v) => ({ created_at: v.pagada_at, monto: Number(v.total) || 0, metodo: v.metodo })),
+        ...(pRes.data || []).map((p) => ({
+          created_at: p.created_at,
+          monto: Number(p.monto) || 0,
+          metodo: p.metodo,
+        })),
+      ];
+    } catch (e) {
+      ingresosTorneo = [];
+      comandasTorneo = [];
+    }
+
+    // Suma un ingreso del torneo al bucket que le corresponda (mes o día).
+    const sumaTorneo = (b, t) => {
+      if (!b) return;
+      const monto = Number(t.monto) || 0;
+      if (b[t.metodo] !== undefined) b[t.metodo] += monto;
+      b.vendido += monto;
+      b.cobrado += monto;
+      b.torneo += monto;
+      b.transacciones += 1;
+    };
+
     // ---- Agregado por MES ----
     const porMes = {};
     const bucketMes = (iso) => {
@@ -125,6 +169,13 @@ export async function GET(request) {
     });
     cuentas.forEach((c) => {
       const b = bucketMes(c.fecha_apertura);
+      if (b) b.cuentas += 1;
+    });
+    ingresosTorneo.forEach((t) => sumaTorneo(bucketMes(t.created_at), t));
+    // Cada comanda cuenta como una cuenta para que el ticket promedio
+    // (cobrado ÷ cuentas) no se dispare al sumarle la plata del torneo.
+    comandasTorneo.forEach((v) => {
+      const b = bucketMes(v.created_at);
       if (b) b.cuentas += 1;
     });
 
@@ -204,6 +255,11 @@ export async function GET(request) {
       });
       cuentas.forEach((c) => {
         const b = bucketDia(c.fecha_apertura);
+        if (b) b.cuentas += 1;
+      });
+      ingresosTorneo.forEach((t) => sumaTorneo(bucketDia(t.created_at), t));
+      comandasTorneo.forEach((v) => {
+        const b = bucketDia(v.created_at);
         if (b) b.cuentas += 1;
       });
 

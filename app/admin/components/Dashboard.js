@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { C, fmt, card } from '../ui';
 import { LineaIngresos, DonaMetodos, TopProductos } from './Charts';
+import Torneo from './Torneo';
 import {
   Alertas,
   CanchasVivo,
@@ -212,7 +213,11 @@ export default function Dashboard() {
           titulo="VENTAS DE HOY"
           valor={fmt(k.ventasHoy.valor)}
           acento={C.petroleo}
-          pie={`${k.ventasHoy.transacciones} pago(s) hoy`}
+          pie={
+            k.ventasHoy.torneo > 0
+              ? `${k.ventasHoy.transacciones} pago(s) hoy · incluye ${fmt(k.ventasHoy.torneo)} del torneo`
+              : `${k.ventasHoy.transacciones} pago(s) hoy`
+          }
         >
           <Delta pct={k.ventasHoy.deltaPct} />
         </KpiCard>
@@ -235,7 +240,11 @@ export default function Dashboard() {
           titulo="TOTAL POR COBRAR"
           valor={fmt(k.porCobrar.total)}
           acento={C.rojo}
-          pie={`${k.porCobrar.cantidad} deuda(s) pendiente(s)`}
+          pie={
+            k.porCobrar.torneo > 0
+              ? `${k.porCobrar.cantidad} deuda(s) · incluye ${fmt(k.porCobrar.torneo)} del torneo`
+              : `${k.porCobrar.cantidad} deuda(s) pendiente(s)`
+          }
         />
       </div>
 
@@ -251,6 +260,9 @@ export default function Dashboard() {
         <DonaMetodos datos={data.graficas.metodosMes} />
         <TopProductos datos={data.graficas.topProductosMes} />
       </div>
+
+      {/* Torneo (solo aparece si hay comandas registradas) */}
+      <Torneo datos={data.torneo} />
 
       {/* Secciones vivas */}
       <CanchasVivo canchas={data.vivo.canchas} />

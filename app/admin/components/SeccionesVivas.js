@@ -154,7 +154,25 @@ export function ListaPorCobrar({ datos }) {
               }}
             >
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: C.navy }}>{d.nombre}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.navy }}>
+                  {d.nombre}
+                  {d.fuente && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: C.navy,
+                        background: 'rgba(242,183,73,0.30)',
+                        padding: '2px 7px',
+                        borderRadius: 20,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {d.fuente}
+                    </span>
+                  )}
+                </div>
                 <div style={{ fontSize: 11, color: d.dias >= 7 ? C.rojo : C.textoTenue }}>
                   {d.dias === 0 ? 'de hoy' : `hace ${d.dias} día(s)`}
                 </div>

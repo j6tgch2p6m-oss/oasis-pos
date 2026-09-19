@@ -117,6 +117,34 @@ export async function GET() {
     if (descuentosRes.error) throw descuentosRes.error;
     if (egresosRes.error) throw egresosRes.error;
 
+    // Ola 1b: módulo TORNEO (`/torneo`). Vive en sus propias tablas y no se
+    // mezcla con turnos ni cuentas del POS, pero su plata sí debe verse aquí.
+    // Va en su propio try: si las tablas no existen todavía, el panel entero
+    // no puede caerse por eso.
+    let tVentas = [];
+    let tItems = [];
+    let tCuentas = [];
+    let tPagos = [];
+    try {
+      const [vRes, iRes, cRes, pRes] = await Promise.all([
+        supabase.from('torneo_ventas').select('*'),
+        supabase.from('torneo_venta_items').select('*'),
+        supabase.from('torneo_cuentas').select('*'),
+        supabase.from('torneo_pagos').select('*'),
+      ]);
+      const errT = vRes.error || iRes.error || cRes.error || pRes.error;
+      if (errT) throw errT;
+      tVentas = vRes.data || [];
+      tItems = iRes.data || [];
+      tCuentas = cRes.data || [];
+      tPagos = pRes.data || [];
+    } catch (e) {
+      tVentas = [];
+      tItems = [];
+      tCuentas = [];
+      tPagos = [];
+    }
+
     const turno = turnoRes.data && turnoRes.data.length ? turnoRes.data[0] : null;
     const pagos = pagosRes.data || [];
     const cuentas = cuentasRes.data || [];
@@ -145,13 +173,40 @@ export async function GET() {
       return t >= ini.getTime() && t < fin.getTime();
     };
 
+    // ---- TORNEO: plata que de verdad ENTRÓ ----
+    // Misma definición que en el POS (una fila de `pagos` = plata recibida):
+    //   · venta 'pagada'    → entró en su `pagada_at`, por su método.
+    //   · abono a una cuenta de cliente (`torneo_pagos`) → entró ese día.
+    //   · venta 'pendiente' (el mesero se llevó el producto) → todavía NO.
+    //   · venta 'cuenta'    → todavía NO; entra cuando el cliente abona.
+    // Así una venta cargada a cuenta nunca se cuenta dos veces.
+    const ingresosTorneo = [
+      ...tVentas
+        .filter((v) => v.estado === 'pagada' && v.metodo && v.pagada_at)
+        .map((v) => ({ created_at: v.pagada_at, monto: Number(v.total) || 0, metodo: v.metodo })),
+      ...tPagos.map((p) => ({
+        created_at: p.created_at,
+        monto: Number(p.monto) || 0,
+        metodo: p.metodo,
+      })),
+    ];
+    const hayTorneo = tVentas.length > 0;
+
     // ---- KPI 1: Ventas de hoy vs. mismo día semana pasada ----
     const pagosHoy = pagos.filter((p) => p.created_at && enRango(p.created_at, inicioHoy, finHoy));
     const pagosSemPasada = pagos.filter(
       (p) => p.created_at && enRango(p.created_at, inicioSemPasada, finSemPasada)
     );
-    const ventasHoy = sumar(pagosHoy, (p) => p.monto);
-    const ventasSemPasada = sumar(pagosSemPasada, (p) => p.monto);
+    const torneoHoy = ingresosTorneo.filter(
+      (t) => t.created_at && enRango(t.created_at, inicioHoy, finHoy)
+    );
+    const torneoSemPasada = ingresosTorneo.filter(
+      (t) => t.created_at && enRango(t.created_at, inicioSemPasada, finSemPasada)
+    );
+    const ventasHoyTorneo = sumar(torneoHoy, (t) => t.monto);
+    const ventasHoy = sumar(pagosHoy, (p) => p.monto) + ventasHoyTorneo;
+    const ventasSemPasada =
+      sumar(pagosSemPasada, (p) => p.monto) + sumar(torneoSemPasada, (t) => t.monto);
     const deltaPct =
       ventasSemPasada > 0
         ? Math.round(((ventasHoy - ventasSemPasada) / ventasSemPasada) * 100)
@@ -191,8 +246,27 @@ export async function GET() {
           )
         : 0;
 
+    // ---- TORNEO: lo que falta por cobrar ----
+    // Dos frentes: lo que un mesero se llevó y todavía no entregó, y el saldo
+    // de las cuentas de clientes abiertas.
+    const tPendientes = tVentas.filter((v) => v.estado === 'pendiente');
+    const saldoCuentaTorneo = (cuentaId) =>
+      sumar(
+        tVentas.filter((v) => v.cuenta_id === cuentaId),
+        (v) => v.total
+      ) -
+      sumar(
+        tPagos.filter((p) => p.cuenta_id === cuentaId),
+        (p) => p.monto
+      );
+    const tCuentasConSaldo = tCuentas
+      .map((c) => ({ ...c, saldo: saldoCuentaTorneo(c.id) }))
+      .filter((c) => c.saldo >= 1);
+    const porCobrarTorneo =
+      sumar(tPendientes, (v) => v.total) + sumar(tCuentasConSaldo, (c) => c.saldo);
+
     // ---- KPI 4: Total por cobrar (cartera pendiente) ----
-    const porCobrarTotal = sumar(cxc, (r) => r.saldo_pendiente);
+    const porCobrarTotal = sumar(cxc, (r) => r.saldo_pendiente) + porCobrarTorneo;
 
     // ---- GRÁFICA 1: Ingresos de los últimos 7 días ----
     // Buckets por fecha calendario Bogotá; los pagos se suman a su día.
@@ -203,13 +277,15 @@ export async function GET() {
       const dow = new Date(inst.getTime() + BOGOTA_OFFSET_MIN * 60000).getUTCDay();
       buckets[key] = { fecha: key, dia: DIAS_SEMANA[dow], total: 0 };
     }
-    pagos.forEach((p) => {
-      if (!p.created_at) return;
-      const t = new Date(p.created_at).getTime();
+    const alBucket7d = (iso, monto) => {
+      if (!iso) return;
+      const t = new Date(iso).getTime();
       if (t < inicio7d.getTime() || t >= finHoy.getTime()) return;
-      const key = fechaBogota(new Date(p.created_at));
-      if (buckets[key]) buckets[key].total += Number(p.monto) || 0;
-    });
+      const key = fechaBogota(new Date(iso));
+      if (buckets[key]) buckets[key].total += Number(monto) || 0;
+    };
+    pagos.forEach((p) => alBucket7d(p.created_at, p.monto));
+    ingresosTorneo.forEach((t) => alBucket7d(t.created_at, t.monto));
     const serie7d = Object.values(buckets);
     const promedio7d = Math.round(sumar(serie7d, (b) => b.total) / 7);
 
@@ -220,6 +296,11 @@ export async function GET() {
       if (!p.created_at) return;
       if (new Date(p.created_at).getTime() < inicioMes.getTime()) return;
       if (acumMetodos[p.metodo] !== undefined) acumMetodos[p.metodo] += Number(p.monto) || 0;
+    });
+    ingresosTorneo.forEach((t) => {
+      if (!t.created_at) return;
+      if (new Date(t.created_at).getTime() < inicioMes.getTime()) return;
+      if (acumMetodos[t.metodo] !== undefined) acumMetodos[t.metodo] += Number(t.monto) || 0;
     });
     const metodosMes = ordenMetodos
       .map((m) => ({ metodo: m, total: acumMetodos[m] }))
@@ -232,6 +313,20 @@ export async function GET() {
       if (!acumProd[nombre]) acumProd[nombre] = { nombre, total: 0, unidades: 0 };
       acumProd[nombre].total += Number(c.total) || 0;
       acumProd[nombre].unidades += Number(c.cantidad) || 0;
+    });
+    // Los productos despachados en el torneo también son rotación del bar, así
+    // que entran al mismo ranking. Se fechan por la venta a la que pertenecen.
+    const fechaVentaTorneo = {};
+    tVentas.forEach((v) => {
+      fechaVentaTorneo[v.id] = v.created_at;
+    });
+    tItems.forEach((it) => {
+      const cuando = fechaVentaTorneo[it.venta_id];
+      if (!cuando || new Date(cuando).getTime() < inicioMes.getTime()) return;
+      const nombre = it.nombre_snapshot || 'Sin nombre';
+      if (!acumProd[nombre]) acumProd[nombre] = { nombre, total: 0, unidades: 0 };
+      acumProd[nombre].total += Number(it.total) || 0;
+      acumProd[nombre].unidades += Number(it.cantidad) || 0;
     });
     const topProductosMes = Object.values(acumProd)
       .sort((a, b) => b.total - a.total)
@@ -314,11 +409,28 @@ export async function GET() {
     }
 
     // ---- LISTA POR COBRAR (cartera, más antigua primero) ----
-    const listaPorCobrar = cxcOrden.map((r) => ({
-      nombre: r.jugador_nombre,
-      saldo: Number(r.saldo_pendiente) || 0,
-      dias: diasDesde(r.created_at),
-    }));
+    // Incluye lo del torneo, etiquetado, para que esta lista sume exactamente
+    // lo mismo que la tarjeta "Total por cobrar".
+    const listaPorCobrar = [
+      ...cxcOrden.map((r) => ({
+        nombre: r.jugador_nombre,
+        saldo: Number(r.saldo_pendiente) || 0,
+        dias: diasDesde(r.created_at),
+        fuente: null,
+      })),
+      ...tPendientes.map((v) => ({
+        nombre: v.mesero,
+        saldo: Number(v.total) || 0,
+        dias: diasDesde(v.created_at),
+        fuente: 'torneo · mesero',
+      })),
+      ...tCuentasConSaldo.map((c) => ({
+        nombre: c.nombre,
+        saldo: c.saldo,
+        dias: diasDesde(c.created_at),
+        fuente: 'torneo · cliente',
+      })),
+    ].sort((a, b) => b.dias - a.dias);
 
     // ---- TOP CLIENTES DEL MES (por gasto, nombre normalizado) ----
     const pagosMes = pagos.filter(
@@ -343,7 +455,10 @@ export async function GET() {
       .slice(0, 6);
 
     // ---- PROYECCIÓN DEL MES ----
-    const ventasMes = sumar(pagosMes, (p) => p.monto);
+    const torneoMes = ingresosTorneo.filter(
+      (t) => t.created_at && new Date(t.created_at).getTime() >= inicioMes.getTime()
+    );
+    const ventasMes = sumar(pagosMes, (p) => p.monto) + sumar(torneoMes, (t) => t.monto);
     const localNow = new Date(ahora.getTime() + BOGOTA_OFFSET_MIN * 60000);
     const diaDelMes = localNow.getUTCDate();
     const diasMes = new Date(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 0).getDate();
@@ -400,6 +515,48 @@ export async function GET() {
       })),
     };
 
+    // ---- RESUMEN DEL TORNEO (bloque propio del panel) ----
+    // El desglose por mesero usa solo las ventas que ese mesero cerró; los
+    // abonos de cuentas de clientes no son de nadie en particular y por eso
+    // van aparte. Es el mismo criterio de la pantalla /torneo, para que las
+    // dos vistas nunca digan cifras distintas.
+    const porMeseroTorneo = Array.from(new Set(tVentas.map((v) => v.mesero)))
+      .sort()
+      .map((m) => {
+        const mias = tVentas.filter((v) => v.mesero === m);
+        const su = (filtro) => sumar(mias.filter(filtro), (v) => v.total);
+        return {
+          mesero: m,
+          comandas: mias.length,
+          despachado: su(() => true),
+          efectivo: su((v) => v.estado === 'pagada' && v.metodo === 'efectivo'),
+          transferencia: su((v) => v.estado === 'pagada' && v.metodo === 'transferencia'),
+          aCuentas: su((v) => v.estado === 'cuenta'),
+          pendiente: su((v) => v.estado === 'pendiente'),
+        };
+      });
+    const torneo = {
+      activo: hayTorneo,
+      comandas: tVentas.length,
+      despachado: sumar(tVentas, (v) => v.total),
+      recaudado: sumar(ingresosTorneo, (t) => t.monto),
+      efectivo: sumar(
+        ingresosTorneo.filter((t) => t.metodo === 'efectivo'),
+        (t) => t.monto
+      ),
+      transferencia: sumar(
+        ingresosTorneo.filter((t) => t.metodo === 'transferencia'),
+        (t) => t.monto
+      ),
+      abonos: sumar(tPagos, (p) => p.monto),
+      pendienteMeseros: sumar(tPendientes, (v) => v.total),
+      comandasPendientes: tPendientes.length,
+      saldoClientes: sumar(tCuentasConSaldo, (c) => c.saldo),
+      cuentasAbiertas: tCuentas.filter((c) => c.abierta).length,
+      hoy: ventasHoyTorneo,
+      porMesero: porMeseroTorneo,
+    };
+
     return NextResponse.json(
       {
         generadoEn: ahora.toISOString(),
@@ -416,7 +573,8 @@ export async function GET() {
             valor: ventasHoy,
             comparativo: ventasSemPasada,
             deltaPct,
-            transacciones: pagosHoy.length,
+            transacciones: pagosHoy.length + torneoHoy.length,
+            torneo: ventasHoyTorneo,
           },
           cuentasHoy: {
             abiertas: cuentasHoyAbiertas,
@@ -429,7 +587,8 @@ export async function GET() {
           },
           porCobrar: {
             total: porCobrarTotal,
-            cantidad: cxc.length,
+            cantidad: cxc.length + tPendientes.length + tCuentasConSaldo.length,
+            torneo: porCobrarTorneo,
           },
         },
         graficas: {
@@ -454,6 +613,7 @@ export async function GET() {
         reservasMes,
         descuentosMes,
         egresosMes,
+        torneo,
       },
       noStore
     );
