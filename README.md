@@ -17,3 +17,8 @@ Construido con Next.js + Supabase, desplegado en Vercel.
   Login por nombre de usuario (la lista vive en `lib/reservasAuth.js`:
   admin, Pampa, Juanes, Laura). Requiere la tabla `reservas`
   (incluida en `SCHEMA.sql`).
+- `/torneo` — caja rápida para torneos (una pantalla: mesero → productos →
+  cómo paga). Genera un número de comanda secuencial que se anota en papel
+  para bodega. Meseros fijos en `app/api/torneo/route.js`. Protegido con un
+  PIN: variable `TORNEO_PIN` en Vercel (si no está definida, usa `2026`).
+  Requiere las tablas `torneo_*` (ver `SCHEMA_TORNEO.sql`, ya aplicado).
