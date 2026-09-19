@@ -157,11 +157,23 @@ end $$;
 -- ---------- RPC: reiniciar el torneo (borra TODO lo del torneo) ----------
 create or replace function torneo_reiniciar() returns void language plpgsql as $$
 begin
-  delete from torneo_pagos;
-  delete from torneo_venta_items;
-  delete from torneo_ventas;
-  delete from torneo_cuentas;
-  alter sequence torneo_ventas_numero_seq restart with 1;
+  -- pg_safeupdate (activo en las peticiones de PostgREST) exige WHERE en cada DELETE.
+  delete from torneo_pagos       where true;
+  delete from torneo_venta_items where true;
+  delete from torneo_ventas      where true;
+  delete from torneo_cuentas     where true;
+  -- setval en vez de "alter sequence restart": service_role no es dueña de la secuencia.
+  perform setval('torneo_ventas_numero_seq', 1, false);
 end $$;
+
+-- Las funciones corren como quien las llama (sin SECURITY DEFINER). Aun así se
+-- les quita el EXECUTE que Postgres da a PUBLIC por defecto, para que solo la
+-- API (service_role) pueda invocarlas y nunca la clave anónima.
+revoke execute on function torneo_crear_venta(text, text, text, uuid, jsonb) from public, anon, authenticated;
+revoke execute on function torneo_abonar(uuid, numeric, text)                 from public, anon, authenticated;
+revoke execute on function torneo_reiniciar()                                 from public, anon, authenticated;
+grant  execute on function torneo_crear_venta(text, text, text, uuid, jsonb) to service_role;
+grant  execute on function torneo_abonar(uuid, numeric, text)                to service_role;
+grant  execute on function torneo_reiniciar()                                to service_role;
 
 notify pgrst, 'reload schema';
