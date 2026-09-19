@@ -1076,7 +1076,9 @@ const CSS = `
 .tq-confirm-num{font-family:'Bricolage Grotesque',sans-serif;font-size:96px;font-weight:800;line-height:1;color:var(--accent);font-variant-numeric:tabular-nums}
 .tq-confirm-mesero{font-size:26px;font-weight:800}
 .tq-confirm-items{font-size:16px;color:var(--ink);display:grid;gap:2px}
-.tq-confirm-tot{font-weight:700;color:var(--muted);text-transform:capitalize}
+/* sin capitalize: convertía "a cuenta de Mesa VIP" en "A Cuenta De Mesa VIP" */
+.tq-confirm-tot{font-weight:700;color:var(--muted)}
+.tq-confirm-tot::first-letter{text-transform:uppercase}
 .tq-modal{background:var(--paper);border-radius:12px;padding:20px;display:grid;gap:10px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);max-height:92vh;overflow:auto}
 .tq-modal.ancho{max-width:640px}
 .tq-modal h3{margin:0;font-family:'Bricolage Grotesque',sans-serif;font-size:22px}
