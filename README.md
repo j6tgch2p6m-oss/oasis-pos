@@ -22,3 +22,5 @@ Construido con Next.js + Supabase, desplegado en Vercel.
   para bodega. Meseros fijos en `app/api/torneo/route.js`. Protegido con un
   PIN: variable `TORNEO_PIN` en Vercel (si no está definida, usa `2026`).
   Requiere las tablas `torneo_*` (ver `SCHEMA_TORNEO.sql`, ya aplicado).
+  Tiene cierre de día: guarda el corte con su arqueo de efectivo y arranca el
+  día siguiente en cero, sin reiniciar la numeración de comandas.

@@ -37,14 +37,15 @@ function saldoDe(cuentaId, ventas, pagos) {
 export async function GET(request) {
   if (!pinOk(request)) return fail('PIN incorrecto', 401);
   try {
-    const [prodRes, ventasRes, itemsRes, cuentasRes, pagosRes] = await Promise.all([
+    const [prodRes, ventasRes, itemsRes, cuentasRes, pagosRes, cierresRes] = await Promise.all([
       supabase.from('productos').select('*').eq('activo', true).order('nombre'),
       supabase.from('torneo_ventas').select('*').order('numero', { ascending: false }),
       supabase.from('torneo_venta_items').select('*'),
       supabase.from('torneo_cuentas').select('*').order('created_at'),
       supabase.from('torneo_pagos').select('*').order('created_at'),
+      supabase.from('torneo_cierres').select('*').order('numero'),
     ]);
-    for (const r of [prodRes, ventasRes, itemsRes, cuentasRes, pagosRes]) {
+    for (const r of [prodRes, ventasRes, itemsRes, cuentasRes, pagosRes, cierresRes]) {
       if (r.error) throw r.error;
     }
 
@@ -53,13 +54,37 @@ export async function GET(request) {
     for (const it of itemsRes.data || []) {
       (itemsPorVenta[it.venta_id] ||= []).push(it);
     }
-    const ventas = (ventasRes.data || []).map((v) => ({ ...v, items: itemsPorVenta[v.id] || [] }));
-    const pagos = pagosRes.data || [];
+
+    // El día en curso arranca donde terminó el último cierre. Lo que pasó antes
+    // ya está archivado, pero las comandas sin cobrar y las cuentas con saldo
+    // siguen apareciendo aunque sean de un día anterior: esa plata todavía se
+    // debe. Cada venta y cada abono viene marcado para que la pantalla sepa
+    // cuáles son del día en curso.
+    const cierres = cierresRes.data || [];
+    const desde = cierres.length ? cierres[cierres.length - 1].hasta : null;
+    const enElDia = (iso) => !!iso && (!desde || new Date(iso) > new Date(desde));
+
+    const ventas = (ventasRes.data || []).map((v) => ({
+      ...v,
+      items: itemsPorVenta[v.id] || [],
+      del_dia: enElDia(v.created_at),
+      cobrada_en_el_dia: v.estado === 'pagada' && enElDia(v.pagada_at),
+    }));
+    const pagos = (pagosRes.data || []).map((p) => ({ ...p, del_dia: enElDia(p.created_at) }));
     const cuentas = (cuentasRes.data || []).map((c) => ({ ...c, saldo: saldoDe(c.id, ventas, pagos) }));
     const siguiente = ventas.length ? Number(ventas[0].numero) + 1 : 1;
 
     return NextResponse.json(
-      { meseros: MESEROS, productos, ventas, cuentas, pagos, siguiente_numero: siguiente },
+      {
+        meseros: MESEROS,
+        productos,
+        ventas,
+        cuentas,
+        pagos,
+        cierres,
+        dia: { numero: cierres.length + 1, desde },
+        siguiente_numero: siguiente,
+      },
       noStore
     );
   } catch (e) {
@@ -175,6 +200,27 @@ export async function POST(request) {
       const { error } = await supabase.from('torneo_ventas').delete().eq('id', venta_id);
       if (error) throw error;
       return NextResponse.json({ ok: true }, noStore);
+    }
+
+    // ---- Cerrar el día ----
+    // Guarda el corte del día con su arqueo de efectivo. Si quedan comandas
+    // por cobrar o cuentas de clientes con saldo, la base lo rechaza salvo
+    // que se mande `forzar`, y entonces esas deudas quedan anotadas en el
+    // cierre y siguen visibles al día siguiente.
+    if (accion === 'cerrar_dia') {
+      const contado = body.efectivo_contado == null || body.efectivo_contado === ''
+        ? null
+        : Number(body.efectivo_contado);
+      if (contado != null && (!Number.isFinite(contado) || contado < 0)) {
+        return fail('El efectivo contado no es un número válido');
+      }
+      const { data, error } = await supabase.rpc('torneo_cerrar_dia', {
+        p_efectivo_contado: contado,
+        p_notas: body.notas || null,
+        p_forzar: body.forzar === true,
+      });
+      if (error) throw error;
+      return NextResponse.json({ cierre: data }, noStore);
     }
 
     // ---- Borrar todo el torneo (pruebas) ----

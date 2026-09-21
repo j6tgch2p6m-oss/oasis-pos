@@ -57,6 +57,31 @@ alter table torneo_ventas      enable row level security;
 alter table torneo_venta_items enable row level security;
 alter table torneo_pagos       enable row level security;
 
+-- Cierres de día. Un "día" es una ventana de tiempo: va desde el cierre
+-- anterior hasta el momento en que se cierra. Así no hay que marcar cada venta
+-- y las comandas sin cobrar siguen visibles al día siguiente.
+create table if not exists torneo_cierres (
+  id                uuid primary key default uuid_generate_v4(),
+  numero            serial,
+  desde             timestamptz,            -- null = desde el principio
+  hasta             timestamptz not null,
+  comandas          int     not null default 0,
+  despachado        numeric not null default 0,
+  recaudado         numeric not null default 0,
+  efectivo          numeric not null default 0,
+  transferencia     numeric not null default 0,
+  abonos            numeric not null default 0,
+  efectivo_contado  numeric,
+  diferencia        numeric,
+  pendiente_cierre  numeric not null default 0,
+  saldo_clientes    numeric not null default 0,
+  por_mesero        jsonb   not null default '[]'::jsonb,
+  notas             text,
+  created_at        timestamptz not null default now()
+);
+create index if not exists torneo_cierres_hasta_idx on torneo_cierres(hasta);
+alter table torneo_cierres enable row level security;
+
 -- ---------- RPC: crear venta + items en UNA transacción ----------
 -- Los precios los pone el catálogo (productos), nunca el cliente.
 create or replace function torneo_crear_venta(
@@ -154,6 +179,115 @@ begin
   return jsonb_build_object('saldo', v_saldo, 'cerrada', v_saldo < 1);
 end $$;
 
+-- ---------- RPC: cerrar el día ----------
+-- La plata se atribuye al día en que ENTRÓ (pagada_at del cobro o fecha del
+-- abono), igual que en el panel admin. Lo despachado se atribuye al día en que
+-- se hizo la comanda. Así, cobrar hoy una comanda de ayer suma a hoy, que es
+-- cuando de verdad entró el dinero a la caja.
+create or replace function torneo_cerrar_dia(
+  p_efectivo_contado numeric default null,
+  p_notas            text    default null,
+  p_forzar           boolean default false
+) returns torneo_cierres language plpgsql as $$
+declare
+  v_desde   timestamptz;
+  v_hasta   timestamptz := now();
+  v_cierre  torneo_cierres;
+  v_pend    numeric;
+  v_saldo   numeric;
+  v_efe     numeric;
+  v_tra     numeric;
+  v_abonos  numeric;
+  v_desp    numeric;
+  v_com     int;
+  v_mes     jsonb;
+begin
+  select max(hasta) into v_desde from torneo_cierres;
+
+  if not exists (
+    select 1 from torneo_ventas
+      where (v_desde is null or created_at > v_desde) and created_at <= v_hasta
+  ) and not exists (
+    select 1 from torneo_ventas
+      where estado = 'pagada' and pagada_at is not null
+        and (v_desde is null or pagada_at > v_desde) and pagada_at <= v_hasta
+  ) and not exists (
+    select 1 from torneo_pagos
+      where (v_desde is null or created_at > v_desde) and created_at <= v_hasta
+  ) then
+    raise exception 'No hay movimientos para cerrar en este día';
+  end if;
+
+  select coalesce(sum(total), 0) into v_pend
+    from torneo_ventas where estado = 'pendiente';
+
+  select coalesce(sum(s.saldo), 0) into v_saldo from (
+    select c.id,
+           coalesce((select sum(v.total) from torneo_ventas v where v.cuenta_id = c.id), 0)
+         - coalesce((select sum(p.monto) from torneo_pagos  p where p.cuenta_id = c.id), 0) as saldo
+      from torneo_cuentas c where c.abierta
+  ) s where s.saldo >= 1;
+
+  if not p_forzar and (v_pend >= 1 or v_saldo >= 1) then
+    raise exception 'Quedan cobros pendientes: % de meseros y % de clientes', v_pend, v_saldo;
+  end if;
+
+  select coalesce(sum(total), 0), count(*) into v_desp, v_com
+    from torneo_ventas
+    where (v_desde is null or created_at > v_desde) and created_at <= v_hasta;
+
+  select
+    coalesce(sum(x.monto) filter (where x.metodo = 'efectivo'), 0),
+    coalesce(sum(x.monto) filter (where x.metodo = 'transferencia'), 0)
+  into v_efe, v_tra
+  from (
+    select v.metodo, v.total as monto from torneo_ventas v
+      where v.estado = 'pagada' and v.metodo is not null and v.pagada_at is not null
+        and (v_desde is null or v.pagada_at > v_desde) and v.pagada_at <= v_hasta
+    union all
+    select p.metodo, p.monto from torneo_pagos p
+      where (v_desde is null or p.created_at > v_desde) and p.created_at <= v_hasta
+  ) x;
+
+  select coalesce(sum(monto), 0) into v_abonos from torneo_pagos
+    where (v_desde is null or created_at > v_desde) and created_at <= v_hasta;
+
+  select coalesce(jsonb_agg(m order by m->>'mesero'), '[]'::jsonb) into v_mes from (
+    select jsonb_build_object(
+      'mesero', t.mesero,
+      'comandas', count(*) filter (where t.es_del_dia),
+      'despachado', coalesce(sum(t.total) filter (where t.es_del_dia), 0),
+      'aCuentas', coalesce(sum(t.total) filter (where t.es_del_dia and t.estado = 'cuenta'), 0),
+      'pendiente', coalesce(sum(t.total) filter (where t.estado = 'pendiente'), 0),
+      'efectivo', coalesce(sum(t.total) filter (where t.cobrado_hoy and t.metodo = 'efectivo'), 0),
+      'transferencia', coalesce(sum(t.total) filter (where t.cobrado_hoy and t.metodo = 'transferencia'), 0)
+    ) as m
+    from (
+      select v.*,
+             ((v_desde is null or v.created_at > v_desde) and v.created_at <= v_hasta) as es_del_dia,
+             (v.estado = 'pagada' and v.pagada_at is not null
+              and (v_desde is null or v.pagada_at > v_desde) and v.pagada_at <= v_hasta) as cobrado_hoy
+        from torneo_ventas v
+    ) t
+    where t.es_del_dia or t.cobrado_hoy or t.estado = 'pendiente'
+    group by t.mesero
+  ) sub;
+
+  insert into torneo_cierres (
+    desde, hasta, comandas, despachado, recaudado, efectivo, transferencia,
+    abonos, efectivo_contado, diferencia, pendiente_cierre, saldo_clientes,
+    por_mesero, notas
+  ) values (
+    v_desde, v_hasta, v_com, v_desp, v_efe + v_tra, v_efe, v_tra,
+    v_abonos, p_efectivo_contado,
+    case when p_efectivo_contado is null then null else p_efectivo_contado - v_efe end,
+    v_pend, v_saldo,
+    v_mes, nullif(trim(coalesce(p_notas, '')), '')
+  ) returning * into v_cierre;
+
+  return v_cierre;
+end $$;
+
 -- ---------- RPC: reiniciar el torneo (borra TODO lo del torneo) ----------
 create or replace function torneo_reiniciar() returns void language plpgsql as $$
 begin
@@ -162,8 +296,10 @@ begin
   delete from torneo_venta_items where true;
   delete from torneo_ventas      where true;
   delete from torneo_cuentas     where true;
+  delete from torneo_cierres     where true;
   -- setval en vez de "alter sequence restart": service_role no es dueña de la secuencia.
   perform setval('torneo_ventas_numero_seq', 1, false);
+  perform setval('torneo_cierres_numero_seq', 1, false);
 end $$;
 
 -- Las funciones corren como quien las llama (sin SECURITY DEFINER). Aun así se
@@ -174,6 +310,8 @@ revoke execute on function torneo_abonar(uuid, numeric, text)                 fr
 revoke execute on function torneo_reiniciar()                                 from public, anon, authenticated;
 grant  execute on function torneo_crear_venta(text, text, text, uuid, jsonb) to service_role;
 grant  execute on function torneo_abonar(uuid, numeric, text)                to service_role;
+revoke execute on function torneo_cerrar_dia(numeric, text, boolean)   from public, anon, authenticated;
+grant  execute on function torneo_cerrar_dia(numeric, text, boolean)  to service_role;
 grant  execute on function torneo_reiniciar()                                to service_role;
 
 notify pgrst, 'reload schema';

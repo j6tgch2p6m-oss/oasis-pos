@@ -82,6 +82,8 @@ export default function TorneoApp() {
   const [confirmacion, setConfirmacion] = useState(null); // venta recién creada
   const [cuentaAbierta, setCuentaAbierta] = useState(null); // id de cuenta en detalle
   const [reiniciar, setReiniciar] = useState(null); // texto de confirmación
+  const [cerrando, setCerrando] = useState(null); // { contado, notas, forzar }
+  const [cierreHecho, setCierreHecho] = useState(null); // resumen del día cerrado
 
   const timerRef = useRef(null);
 
@@ -153,17 +155,22 @@ export default function TorneoApp() {
   const totalComanda = lineas.reduce((s, l) => s + Number(l.prod.precio) * l.cant, 0);
   const comandaVacia = lineas.length === 0;
 
+  // El resumen es del DÍA EN CURSO. Lo despachado se cuenta por la fecha de la
+  // comanda; el efectivo y la transferencia, por la fecha en que se cobró. Así,
+  // cobrar hoy una comanda de ayer suma a la caja de hoy, que es cuando de
+  // verdad entró la plata. Lo que sigue por cobrar se muestra completo, sea de
+  // hoy o de ayer, porque esa deuda está viva.
   const resumen = useMemo(() => {
     const filas = meseros.map((m) => {
       const mias = ventas.filter((v) => v.mesero === m);
       const suma = (f) => mias.filter(f).reduce((s, v) => s + Number(v.total), 0);
       return {
         mesero: m,
-        comandas: mias.length,
-        despachado: suma(() => true),
-        efectivo: suma((v) => v.estado === 'pagada' && v.metodo === 'efectivo'),
-        transferencia: suma((v) => v.estado === 'pagada' && v.metodo === 'transferencia'),
-        cuenta: suma((v) => v.estado === 'cuenta'),
+        comandas: mias.filter((v) => v.del_dia).length,
+        despachado: suma((v) => v.del_dia),
+        efectivo: suma((v) => v.cobrada_en_el_dia && v.metodo === 'efectivo'),
+        transferencia: suma((v) => v.cobrada_en_el_dia && v.metodo === 'transferencia'),
+        cuenta: suma((v) => v.del_dia && v.estado === 'cuenta'),
         pendiente: suma((v) => v.estado === 'pendiente'),
       };
     });
@@ -178,14 +185,21 @@ export default function TorneoApp() {
       }),
       { comandas: 0, despachado: 0, efectivo: 0, transferencia: 0, cuenta: 0, pendiente: 0 }
     );
-    const abonosEfe = pagos.filter((p) => p.metodo === 'efectivo').reduce((s, p) => s + Number(p.monto), 0);
-    const abonosTra = pagos.filter((p) => p.metodo === 'transferencia').reduce((s, p) => s + Number(p.monto), 0);
+    const abonosDia = pagos.filter((p) => p.del_dia);
+    const abonosEfe = abonosDia.filter((p) => p.metodo === 'efectivo').reduce((s, p) => s + Number(p.monto), 0);
+    const abonosTra = abonosDia.filter((p) => p.metodo === 'transferencia').reduce((s, p) => s + Number(p.monto), 0);
     const saldoClientes = cuentas.reduce((s, c) => s + Math.max(0, Number(c.saldo)), 0);
     return { filas, total, abonosEfe, abonosTra, saldoClientes };
   }, [meseros, ventas, pagos, cuentas]);
 
   const pendientes = ventas.filter((v) => v.estado === 'pendiente');
-  const ultimas = ventas.slice(0, 8);
+  const ultimas = ventas.filter((v) => v.del_dia).slice(0, 8);
+  const cierres = datos?.cierres || [];
+  const diaNumero = datos?.dia?.numero || 1;
+  // Lo que impide cerrar el día sin forzar.
+  const deudaViva = resumen.total.pendiente + resumen.saldoClientes;
+  const hayMovimientoHoy =
+    ventas.some((v) => v.del_dia || v.cobrada_en_el_dia) || pagos.some((p) => p.del_dia);
 
   // ---- acciones ----
   async function ejecutar(body) {
@@ -263,12 +277,24 @@ export default function TorneoApp() {
     }
   }
 
+  // A qué día pertenece un instante: al cierre cuya ventana lo contiene, o al
+  // día en curso si es posterior al último cierre.
+  function diaDe(iso) {
+    if (!iso) return '';
+    const t = new Date(iso).getTime();
+    for (const c of cierres) {
+      if (t <= new Date(c.hasta).getTime()) return 'Día ' + c.numero;
+    }
+    return 'Día ' + diaNumero + ' (abierto)';
+  }
+
   function exportarCSV() {
     const filas = [
-      ['numero', 'hora', 'mesero', 'estado', 'metodo', 'cliente', 'productos', 'total'],
+      ['dia', 'numero', 'hora', 'mesero', 'estado', 'metodo', 'cliente', 'productos', 'total'],
       ...[...ventas]
         .sort((a, b) => a.numero - b.numero)
         .map((v) => [
+          diaDe(v.created_at),
           v.numero,
           new Date(v.created_at).toLocaleString('es-CO'),
           v.mesero,
@@ -280,12 +306,28 @@ export default function TorneoApp() {
         ]),
       [],
       ['ABONOS DE CLIENTES'],
-      ['hora', 'cliente', 'metodo', 'monto'],
+      ['dia', 'hora', 'cliente', 'metodo', 'monto'],
       ...pagos.map((p) => [
+        diaDe(p.created_at),
         new Date(p.created_at).toLocaleString('es-CO'),
         cuentas.find((c) => c.id === p.cuenta_id)?.nombre || '',
         p.metodo,
         Math.round(Number(p.monto)),
+      ]),
+      [],
+      ['DÍAS CERRADOS'],
+      ['dia', 'cerrado', 'comandas', 'despachado', 'recaudado', 'efectivo', 'transferencia', 'contado', 'diferencia', 'notas'],
+      ...cierres.map((c) => [
+        'Día ' + c.numero,
+        new Date(c.hasta).toLocaleString('es-CO'),
+        c.comandas,
+        Math.round(Number(c.despachado)),
+        Math.round(Number(c.recaudado)),
+        Math.round(Number(c.efectivo)),
+        Math.round(Number(c.transferencia)),
+        c.efectivo_contado == null ? '' : Math.round(Number(c.efectivo_contado)),
+        c.diferencia == null ? '' : Math.round(Number(c.diferencia)),
+        c.notas || '',
       ]),
     ];
     const csv = filas
@@ -376,6 +418,7 @@ export default function TorneoApp() {
           </button>
         </nav>
         <div className="tq-top-der">
+          <span className="tq-pill-dia">Día {diaNumero}</span>
           <span className="tq-pill">Próxima {num(datos?.siguiente_numero ?? '…')}</span>
         </div>
       </header>
@@ -731,7 +774,64 @@ export default function TorneoApp() {
             </div>
           </section>
 
+          {cierres.length > 0 && (
+            <section className="tq-bloque">
+              <h3>Días cerrados</h3>
+              <div className="tq-tabla-wrap">
+                <table className="tq-tabla tq-tabla-sm">
+                  <thead>
+                    <tr>
+                      <th>Día</th>
+                      <th>Cerrado</th>
+                      <th className="num">Comandas</th>
+                      <th className="num">Despachado</th>
+                      <th className="num">Recaudado</th>
+                      <th className="num">Efectivo</th>
+                      <th className="num">Contado</th>
+                      <th className="num">Diferencia</th>
+                      <th>Notas</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cierres.map((c) => {
+                      const dif = c.diferencia == null ? null : Number(c.diferencia);
+                      return (
+                        <tr key={c.id}>
+                          <td>Día {c.numero}</td>
+                          <td>
+                            {new Date(c.hasta).toLocaleString('es-CO', {
+                              day: '2-digit',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="num">{c.comandas}</td>
+                          <td className="num">{fmt(c.despachado)}</td>
+                          <td className="num">{fmt(c.recaudado)}</td>
+                          <td className="num">{fmt(c.efectivo)}</td>
+                          <td className="num">{c.efectivo_contado == null ? '—' : fmt(c.efectivo_contado)}</td>
+                          <td className={'num' + (dif && Math.abs(dif) >= 1 ? ' debe' : '')}>
+                            {dif == null ? '—' : (dif > 0 ? '+' : '') + fmt(dif)}
+                          </td>
+                          <td className="wrap">{c.notas || ''}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           <div className="tq-acciones-final">
+            <button
+              className="tq-btn tq-cerrar-dia"
+              onClick={() => setCerrando({ contado: '', notas: '', forzar: false })}
+              disabled={ocupado || !hayMovimientoHoy}
+            >
+              CERRAR DÍA {diaNumero}
+            </button>
             <button className="tq-btn tq-btn-primario" onClick={exportarCSV} disabled={ventas.length === 0}>
               Exportar CSV
             </button>
@@ -739,6 +839,11 @@ export default function TorneoApp() {
               Reiniciar torneo (borra todo)
             </button>
           </div>
+          {!hayMovimientoHoy && (
+            <div className="tq-mini">
+              El día {diaNumero} todavía no tiene movimientos, así que no hay nada que cerrar.
+            </div>
+          )}
         </main>
       )}
 
@@ -816,6 +921,152 @@ export default function TorneoApp() {
           onAbonar={(monto, metodo) => ejecutar({ accion: 'abonar', cuenta_id: cuentaDetalle.id, monto, metodo })}
           onCerrarCuenta={() => ejecutar({ accion: 'cerrar_cuenta', cuenta_id: cuentaDetalle.id })}
         />
+      )}
+
+      {cerrando && (
+        <div className="tq-overlay" onClick={() => setCerrando(null)}>
+          <form
+            className="tq-modal ancho"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const r = await ejecutar({
+                accion: 'cerrar_dia',
+                efectivo_contado: cerrando.contado === '' ? null : Number(cerrando.contado),
+                notas: cerrando.notas,
+                forzar: cerrando.forzar,
+              });
+              if (r?.cierre) {
+                setCerrando(null);
+                setCierreHecho(r.cierre);
+              }
+            }}
+          >
+            <h3>Cerrar día {diaNumero}</h3>
+
+            <div className="tq-ticket">
+              <div className="tq-row">
+                <span>Despachado</span>
+                <span>{fmt(resumen.total.despachado)}</span>
+              </div>
+              <div className="tq-row">
+                <span>Efectivo recibido</span>
+                <span>{fmt(resumen.total.efectivo + resumen.abonosEfe)}</span>
+              </div>
+              <div className="tq-row">
+                <span>Transferencias</span>
+                <span>{fmt(resumen.total.transferencia + resumen.abonosTra)}</span>
+              </div>
+              <div className="tq-row tq-total">
+                <span>RECAUDADO</span>
+                <span>
+                  {fmt(
+                    resumen.total.efectivo +
+                      resumen.abonosEfe +
+                      resumen.total.transferencia +
+                      resumen.abonosTra
+                  )}
+                </span>
+              </div>
+            </div>
+
+            <label htmlFor="tq-contado">Efectivo contado en el cajón (opcional)</label>
+            <input
+              id="tq-contado"
+              type="number"
+              inputMode="numeric"
+              min="0"
+              step="1"
+              autoFocus
+              placeholder="Déjalo vacío si no vas a contar"
+              value={cerrando.contado}
+              onChange={(e) => setCerrando({ ...cerrando, contado: e.target.value })}
+            />
+            {cerrando.contado !== '' && Number.isFinite(Number(cerrando.contado)) && (
+              <div className="tq-mini">
+                Diferencia contra lo esperado:{' '}
+                <b>
+                  {fmt(Number(cerrando.contado) - (resumen.total.efectivo + resumen.abonosEfe))}
+                </b>
+              </div>
+            )}
+
+            <label htmlFor="tq-notas-cierre">Notas (opcional)</label>
+            <input
+              id="tq-notas-cierre"
+              value={cerrando.notas}
+              onChange={(e) => setCerrando({ ...cerrando, notas: e.target.value })}
+            />
+
+            {deudaViva >= 1 && (
+              <div className="tq-aviso-caja">
+                <b>Ojo: queda plata sin cobrar.</b>
+                <div>
+                  Meseros: {fmt(resumen.total.pendiente)} · Clientes: {fmt(resumen.saldoClientes)}
+                </div>
+                <label className="tq-check">
+                  <input
+                    type="checkbox"
+                    checked={cerrando.forzar}
+                    onChange={(e) => setCerrando({ ...cerrando, forzar: e.target.checked })}
+                  />
+                  <span>
+                    Cerrar de todas formas. Las deudas quedan anotadas en el cierre y siguen
+                    visibles mañana.
+                  </span>
+                </label>
+              </div>
+            )}
+
+            <div className="tq-modal-btns">
+              <button type="button" className="tq-link" onClick={() => setCerrando(null)}>
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="tq-btn tq-cerrar-dia"
+                disabled={ocupado || (deudaViva >= 1 && !cerrando.forzar)}
+              >
+                CERRAR DÍA
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {cierreHecho && (
+        <div className="tq-overlay" onClick={() => setCierreHecho(null)}>
+          <div className="tq-confirm" onClick={(e) => e.stopPropagation()}>
+            <div className="tq-confirm-label">Día cerrado</div>
+            <div className="tq-confirm-num">{cierreHecho.numero}</div>
+            <div className="tq-confirm-items">
+              <div>{cierreHecho.comandas} comandas · despachado {fmt(cierreHecho.despachado)}</div>
+              <div>Efectivo {fmt(cierreHecho.efectivo)} · Transf. {fmt(cierreHecho.transferencia)}</div>
+              {cierreHecho.efectivo_contado != null && (
+                <div>
+                  Contado {fmt(cierreHecho.efectivo_contado)} · diferencia{' '}
+                  {fmt(cierreHecho.diferencia)}
+                </div>
+              )}
+              {Number(cierreHecho.pendiente_cierre) >= 1 && (
+                <div>Quedó por cobrar a meseros: {fmt(cierreHecho.pendiente_cierre)}</div>
+              )}
+              {Number(cierreHecho.saldo_clientes) >= 1 && (
+                <div>Quedó en cuentas de clientes: {fmt(cierreHecho.saldo_clientes)}</div>
+              )}
+            </div>
+            <div className="tq-confirm-tot">
+              recaudado {fmt(cierreHecho.recaudado)}
+            </div>
+            <button className="tq-btn tq-btn-primario grande" autoFocus onClick={() => setCierreHecho(null)}>
+              LISTO
+            </button>
+            <div className="tq-mini">
+              El día {Number(cierreHecho.numero) + 1} arranca en cero. La numeración de comandas
+              sigue corrida para que no se repitan números en el papel.
+            </div>
+          </div>
+        </div>
       )}
 
       {reiniciar !== null && (
@@ -980,6 +1231,13 @@ const CSS = `
 .tq-tabs button.on{background:rgba(255,255,255,.15);opacity:1}
 .tq-badge{background:var(--warn);color:#fff;font-size:11px;padding:1px 7px;border-radius:999px}
 .tq-pill{font-size:13px;background:var(--accent);color:#fff;padding:4px 10px;border-radius:999px;font-weight:600;white-space:nowrap}
+.tq-top-der{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+.tq-pill-dia{font-size:13px;background:var(--sand);color:var(--ink);padding:4px 10px;border-radius:999px;font-weight:700;white-space:nowrap;margin-right:6px}
+.tq-cerrar-dia{background:var(--ink);color:#fff;border-color:var(--ink)}
+.tq-row{display:flex;justify-content:space-between;gap:8px}
+.tq-aviso-caja{background:var(--warn-soft);border:1px solid var(--warn);border-radius:8px;padding:10px 12px;display:grid;gap:6px;font-size:13px}
+.tq-check{display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-size:13px}
+.tq-check input{width:20px;height:20px;flex:0 0 auto;margin-top:1px}
 
 /* caja */
 .tq-caja{display:grid;grid-template-columns:1.4fr 1fr;gap:0;min-height:calc(100vh - 48px)}
